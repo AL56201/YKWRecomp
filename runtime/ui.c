@@ -30,6 +30,14 @@ void ui_init(void) {
     g_window = SDL_CreateWindow("YKW Recomp", 1280 * s, 720 * s,
                                 SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | (g_settings.fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
     if (!g_window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
+    {   // the display's exact refresh rate (fps = display: hle/framerate.c)
+        extern double g_display_hz;
+        const SDL_DisplayMode *m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(g_window));
+        if (m && m->refresh_rate_numerator > 0 && m->refresh_rate_denominator > 0)
+            g_display_hz = (double)m->refresh_rate_numerator / m->refresh_rate_denominator;
+        else if (m && m->refresh_rate > 0) g_display_hz = m->refresh_rate;
+        LOG("[ui] display %dx%d at %.3f Hz\n", m ? m->w : 0, m ? m->h : 0, g_display_hz);
+    }
     egl_host_init();
 }
 

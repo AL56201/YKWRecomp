@@ -40,3 +40,19 @@ def _frame_interval(gen, a):
 
 for _a in FRAME_INTERVAL_SITES:
     PATCHES[_a] = _frame_interval
+
+
+# The time scale itself (str s0, [x0, #0x7dc]: interval / base) goes through ykw_time_scale(), which scales it by
+# 60 / our vsync rate: with vsync at the display's rate (75, 120, 144 Hz...) the game keeps its 60 Hz speed.
+TIME_SCALE_SITES = {MAIN + 0x2bef24: 0xbd07dc00, MAIN + 0x2bf7a4: 0xbd07dc00}  # str s0, [x0, #0x7dc]
+
+
+def _time_scale(gen, a):
+    w = _word(gen, a)
+    assert w == TIME_SCALE_SITES[a], f'{a:#x}: {w:#010x}'
+    return ('{ extern float ykw_time_scale(float); float s; memcpy(&s, &c->v[0], 4); s = ykw_time_scale(s); '
+            f'ST32(c->x[0] + 0x7dc, *(uint32_t *)&s); }}  /* {a:#x}: str s0, [x0, #0x7dc] (time scale) */')
+
+
+for _a in TIME_SCALE_SITES:
+    PATCHES[_a] = _time_scale

@@ -1,4 +1,4 @@
-﻿# YKW Recomp
+# YKW Recomp
 
 A static recompilation of *Yo-kai Watch 1 for Nintendo Switch* (JP, title `0100C0000CEEA000`, update **1.3.0**) into
 a native Windows program. Early work in progress: the game boots and draws, nothing is playable yet.
@@ -10,8 +10,8 @@ No game files, keys or generated code are in this folder. Everything is built fr
 | Piece | Where | Notes |
 |---|---|---|
 | NSP intake | `tools/nxextract.py` | Decrypts your base + update NSPs with your keys; writes `exefs/` and the BKTR-patched `romfs/` |
-| Recompiler | `tools/gen.py`, `lifter.py`, `simd_c.py` â€¦ | From LAS Recomp (MIT): AArch64 `main` + `sdk` NSOs â†’ one C function per guest function |
-| Runtime core | `runtime/kernel.c`, `loader.c`, `dispatch.c`, `ipc.c`, `services/` | From LAS Recomp: threads, sync, memory, IPC services (fs, hid, audio, time, amâ€¦) |
+| Recompiler | `tools/gen.py`, `lifter.py`, `simd_c.py` … | From LAS Recomp (MIT): AArch64 `main` + `sdk` NSOs → one C function per guest function |
+| Runtime core | `runtime/kernel.c`, `loader.c`, `dispatch.c`, `ipc.c`, `services/` | From LAS Recomp: threads, sync, memory, IPC services (fs, hid, audio, time, am…) |
 | Graphics | `runtime/gl/` | **New.** The game uses OpenGL through NVIDIA's driver (`subsdk0`), not NVN. That driver isn't loaded: EGL is implemented on SDL, and `eglGetProcAddress` hands out thunks (generated from Khronos `gl.xml` by `tools/gen_gl_thunks.py`) that call your PC's OpenGL 4.5 driver |
 | Movies | `runtime/hle/movie.c` | LAS's `nn::movie` on FFmpeg, adapted (the game provides its own output buffers) |
 | Input | `runtime/ui.c`, `runtime/hle/input.c` | Keyboard, SDL gamepad, mouse as the touch screen |
@@ -29,7 +29,7 @@ python -I tools\nxextract.py --keys ..\prod.keys --base "<base>.nsp" --update "<
 ```
 Then, from an MSYS2 UCRT64 shell (or with `C:\msys64\ucrt64\bin;C:\msys64\usr\bin` first on PATH):
 ```
-make gen PY=<windows python>      # ~25 s: generated/ (â‰ˆ218 MB of C, 61k functions)
+make gen PY=<windows python>      # ~25 s: generated/ (≈218 MB of C, 61k functions)
 make -j12 PY=<windows python>     # build/ykwrecomp.exe
 ```
 Run: `build\ykwrecomp.exe ..\extracted` with `C:\msys64\ucrt64\bin` on PATH (SDL3/FFmpeg DLLs).
@@ -40,7 +40,7 @@ The executable refuses an `exefs/main` other than the one it was generated from 
 ## Controls
 
 Keyboard: WASD left stick, IJKL right stick, arrows d-pad, Space A, Left Shift B, F X, R Y, Q L, E R, 1 ZL, 3 ZR,
-Enter +, Backspace âˆ’, mouse = touch screen, F11 / Alt+Enter fullscreen. Gamepads map by position (east = A).
+Enter +, Backspace −, mouse = touch screen, F11 / Alt+Enter fullscreen. Gamepads map by position (east = A).
 
 ## Mods (e.g. the English translation, GameBanana 516048)
 
@@ -77,7 +77,8 @@ license is CC BY-NC-ND).
 | `YKW_GL_NATIVE_SMOOTHSTEP=1`, `YKW_SHADER_CACHE=1`, `YKW_DIRECT_FB0=1` | Turn off the smoothstep fix / the fresh shader compiles / the offscreen framebuffer 0 |
 | `YKW_SHADER_SUB="from=>to;;..."` | Text replacements in the post-effect shader (experiments) |
 | `[shot] ... sharpness` (with `YKW_SHOT_EVERY`) | Mean neighbour luma difference in the middle of the 3D view: ~254 blurred, ~623 sharp in Nate's room |
-| `YKW_FPS=60` / `30` | Frame rate for this run (overrides `unlock_fps`); `[fps]` lines every 5 s (`YKW_FPS_LOG=0`: off) |
+| `YKW_FPS=30` / `display` / `<n>` | Frame rate for this run (overrides `fps`); `[fps]` lines every 5 s with frame time, worst and stutters (`YKW_FPS_LOG=0`: off) |
+| `YKW_VSYNC_TIMER=1` | At `display`: pace with the plain timer instead of the presentations |
 | `YKW_TEST_CLOCK=1` | `YKW_INPUT` / `YKW_SHOT_EVERY` count thirtieths of a second instead of frames |
 | `YKW_INPUT=600:A,900-3000/90:PLUS` | Scripted presses at presented frames (held 6 frames) |
 | `YKW_SHOT_EVERY=<n>`, `YKW_SHOT_DIR=<dir>` | Save the game's image every n frames (half size, BMP) |
@@ -89,7 +90,7 @@ and game initialisation; save file created; the game renders through host OpenGL
 including its 38 GLSL programs); **the opening movie plays in full colour with subtitles and the game reaches the
 title screen**, with the title's attract loop replaying the opening.
 
-Movie note: the game gives the decoder one output buffer of its own (packed NV12, width Ã— height Ã— 1.5, set with
+Movie note: the game gives the decoder one output buffer of its own (packed NV12, width × height × 1.5, set with
 `movie::Buffer::SetDataAndCapacity`) and draws from it. `hle/movie.c` reports a packed layout and packs every frame
 into that buffer; LAS's version swapped in its own buffer, which left the game drawing zeros (green).
 
@@ -98,12 +99,27 @@ HUD, minimap and objectives, in English with the translation mod (6 minutes of s
 check needed `hle/ngc.c`: the real profanity filter reads console system data (NgWord, `0100000000000823`) that
 isn't in a game dump, and the SDK aborted when the name was confirmed.
 
-Frame rate: the engine waits a whole number of vsyncs per frame (2 = 30 fps at boot) and scales game logic by
-interval Ã· base (its logic step), stored by its frame-rate setters at `main+0x2beee0` / `main+0x2bf770`
-(`+0x7d0` base, `+0x7d4` interval, `+0x7dc` scale). `tools/patches.py` routes the interval through
-`hle/framerate.c`: with `unlock_fps = 1` in `ykwrecomp.ini` (or `YKW_FPS=60`) it is the base, so the game runs at
-60 fps (measured 58.8â€“59.4) and the engine itself sets the matching time scale. Checked against a 30 fps run with
-the same clock-timed input: the same scene at the same second (playground dialogue, position in Nate's room).
+Frame rate: set `fps` in `ykwrecomp.ini` to `30` (the game's own, default), `display` (your monitor's refresh,
+recommended), or a number such as `60`, `120`, `144` (`YKW_FPS` overrides it for a run; `unlock_fps = 1` from
+older builds means `display`).
+- The engine waits a whole number of vsyncs per frame (2 = 30 fps at boot), runs one logic step per vsync (replaying
+  the ones a slow frame missed) and scales movement and timers by a time scale stored by its frame-rate setters at
+  `main+0x2beee0` / `main+0x2bf770` (`+0x7d0` base, `+0x7d4` interval, `+0x7dc` scale, read in 65 places).
+  `tools/patches.py` routes the interval and the scale through `hle/framerate.c`: unlocked, one frame per vsync, the
+  vsync at the target rate (`hle/vi.c`), and the scale × 60 ÷ rate, so the game keeps its speed at any rate.
+- `display`: the game's vsync is each frame reaching the monitor (`glFinish` after the swap), with a timer only as
+  the fallback for frames that miss. A plain timer at the same rate drifts against the real refresh.
+- Measured on a 75 Hz monitor, from a save, one run at a time:
+
+  | `fps` | measured | frame time | stutters per 5 s |
+  |---|---|---|---|
+  | `60` | 58–59 | 17.0 ± 2.4 ms | 6–11 (60 frames on 75 refreshes: every 4th shown twice) |
+  | `display` (75), plain timer | 72–73 | 13.8 ± 2.6 ms | 9–16 |
+  | `display` (75) | **75.0** | **13.33 ± 1.0–1.6 ms**, worst 21 ms | 1–5 small, no missed refresh |
+  | `144` (above the display: driver vsync off) | 133–135 | 7.4 ± 1.8 ms | ~50 |
+- Speed checked with clock-timed input (`YKW_TEST_CLOCK=1`, hold right for 2 s): the walk ends at the same spot at
+  30, 75 (timer and display-locked), 120 and 144 fps.
+- Above the display's rate the extra frames can't all be shown (vsync off, tearing); `display` is the smooth choice.
 
 Graphics notes:
 - **Depth of field blurred the whole 3D scene on AMD.** Two causes, both in `gl/gl_fixups.c`:
@@ -114,17 +130,16 @@ Graphics notes:
   2. AMD's on-disk shader cache: what it loaded on later launches drew the effect blurred again even with (1) in
      place, while every fresh compile was sharp. Each changed shader carries a tag unique to the launch, so the
      driver compiles them fresh at every boot (`YKW_SHADER_CACHE=1`: allow its cache).
-  Measured with the screenshot sharpness metric over repeated runs from a save: blurred 254, fixed 622â€“636, the
+  Measured with the screenshot sharpness metric over repeated runs from a save: blurred 254, fixed 622–636, the
   same as depth of field off, at 30 and 60 fps, on first and later launches and over a 5-minute session.
-- The game draws a fixed 1920Ã—1080 image (its `vi` layer size) into "framebuffer 0". That is an offscreen framebuffer
+- The game draws a fixed 1920×1080 image (its `vi` layer size) into "framebuffer 0". That is an offscreen framebuffer
   per context (`gl/fb0.c`), scaled into the window on `eglSwapBuffers`, letterboxed to 16:9; the mouse-as-touch
   mapping follows the same rectangle. `YKW_DIRECT_FB0=1` draws straight into the window as before.
 
 Next:
-1. Above 60 fps (120/144): needs the vsync timer at the display's rate and a logic step finer than one 60 Hz vsync.
-3. Movie audio: only a video decoder is created for the opening; check whether its sound comes through CRI instead.
-3. Shaders on NVIDIA/Intel, frame pacing, internal resolution above 1080p.
-4. Play further with the English translation in `mods/` and note anything that depends on 1.4.0.
+1. Movie audio: only a video decoder is created for the opening; check whether its sound comes through CRI instead.
+2. Shaders on NVIDIA/Intel, internal resolution above 1080p, a frame-rate cap for `fps` above the display.
+3. Play further with the English translation in `mods/` and note anything that depends on 1.4.0.
 
 ## References
 

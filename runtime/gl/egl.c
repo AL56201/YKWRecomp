@@ -2,6 +2,7 @@
 // OpenGL contexts, and eglGetProcAddress hands out the generated GL thunks (gl_thunks.c), which call the host driver.
 // The game asks for desktop OpenGL (eglBindAPI(EGL_OPENGL_API), "#version 450" shaders), so most calls pass straight
 // through.
+#include <math.h>
 #include <pthread.h>
 #include <stdlib.h>
 
@@ -119,7 +120,11 @@ HLE_FUNC("eglSwapInterval", egl_swap_interval) {
     static int last = -1;
     if ((int)c->x[1] != last) LOG("[egl] eglSwapInterval(%d)\n", (int)c->x[1]);
     last = (int)c->x[1];
-    SDL_GL_SetSwapInterval(g_settings.vsync ? (int)c->x[1] : 0);
+    // (a frame rate above the display's: the driver's vsync would hold it to the display, so it's off; the game's own
+    // pacing - our vsync timer - keeps the rate)
+    extern double ykw_vsync_hz(void), g_display_hz;
+    bool above = ykw_vsync_hz() > g_display_hz + 0.5;
+    SDL_GL_SetSwapInterval(g_settings.vsync && !above ? (int)c->x[1] : 0);
     c->x[0] = 1;
 }
 
@@ -293,16 +298,37 @@ HLE_FUNC("eglSwapBuffers", egl_swap_buffers) {
     extern void fb0_present(void);  // (fb0.c: the game's image, scaled into the window)
     fb0_present();
     SDL_GL_SwapWindow(g_window);
+    extern bool vi_present_locked(void);
+    extern void vi_presented(void);
+    if (vi_present_locked()) {  // (hle/vi.c: the game's vsync is this frame reaching the display)
+        glFinish();  // (returns once the swap is done: at the refresh it was shown at, not when it was queued)
+        vi_presented();
+    }
     uint64_t n = __atomic_add_fetch(&g_swaps, 1, __ATOMIC_RELEASE);
-    {   // frames per second, every 5 s (YKW_FPS_LOG=0: off)
-        static uint64_t t0, n0;
+    {   // frames per second and frame-to-frame pacing, every 5 s (YKW_FPS_LOG=0: off). "uneven": frames that took more
+        // than 1.5x the target frame time (each one is a visible stutter)
+        static uint64_t t0, n0, last, uneven;
+        static double sum, sum2, worst;
         static int off = -1;
         if (off < 0) { const char *e = getenv("YKW_FPS_LOG"); off = e && !strcmp(e, "0"); }
         uint64_t now = plat_now_ns();
+        extern double ykw_vsync_hz(void);
+        extern double ykw_target_fps(void);
+        double target_ms = 1000.0 / ykw_target_fps();
+        if (last) {
+            double dt = (now - last) / 1e6;
+            sum += dt, sum2 += dt * dt;
+            if (dt > worst) worst = dt;
+            if (dt > target_ms * 1.5 && dt < target_ms * 2.5 * 4) uneven++;
+        }
+        last = now;
         if (!t0) t0 = now, n0 = n;
         if (!off && now - t0 >= 5000000000ull) {
-            LOG("[fps] %.1f (frame %llu)\n", (double)(n - n0) * 1e9 / (double)(now - t0), (unsigned long long)n);
-            t0 = now, n0 = n;
+            double cnt = (double)(n - n0), mean = cnt ? sum / cnt : 0;
+            double sd = cnt ? sqrt(fmax(0, sum2 / cnt - mean * mean)) : 0;
+            LOG("[fps] %.1f (frame %llu): frame time %.2f ms +- %.2f, worst %.1f, %llu uneven\n",
+                cnt * 1e9 / (double)(now - t0), (unsigned long long)n, mean, sd, worst, (unsigned long long)uneven);
+            t0 = now, n0 = n, sum = sum2 = worst = 0, uneven = 0;
         }
     }
     static long trace_at = -2;

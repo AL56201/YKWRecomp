@@ -6,7 +6,7 @@
 #include "settings.h"
 
 Settings g_settings = {.volume = 1.0f, .audio_out = AUDIO_OUT_STEREO, .reverb = true, .movie_audio = true,
-                       .window_scale = 1, .fullscreen = false, .vsync = true, .unlock_fps = false, .language = "ja"};
+                       .window_scale = 1, .fullscreen = false, .vsync = true, .fps = 30, .language = "ja"};
 
 static const char *path(void) {
     const char *e = getenv("YKW_SETTINGS");
@@ -27,7 +27,8 @@ void settings_load(void) {
         else if (sscanf(line, " window_scale = %d", &i) == 1) g_settings.window_scale = i < 1 ? 1 : i > 4 ? 4 : i;
         else if (sscanf(line, " fullscreen = %d", &i) == 1) g_settings.fullscreen = i != 0;
         else if (sscanf(line, " vsync = %d", &i) == 1) g_settings.vsync = i != 0;
-        else if (sscanf(line, " unlock_fps = %d", &i) == 1) g_settings.unlock_fps = i != 0;
+        else if (sscanf(line, " unlock_fps = %d", &i) == 1) { if (i) g_settings.fps = 0; }  // (older setting: display)
+        else if (sscanf(line, " fps = %63s", s) == 1) g_settings.fps = !strcmp(s, "display") ? 0 : atof(s);
         else if (sscanf(line, " language = %7s", s) == 1) snprintf(g_settings.language, sizeof g_settings.language, "%s", s);
     }
     fclose(f);
@@ -36,10 +37,13 @@ void settings_load(void) {
 void settings_save(void) {
     FILE *f = fopen(path(), "w");
     if (!f) return;
+    char fps[32];
+    if (g_settings.fps == 0) snprintf(fps, sizeof fps, "display");
+    else snprintf(fps, sizeof fps, "%g", g_settings.fps);
     fprintf(f, "volume = %.2f\naudio_out = %d\nreverb = %d\nmovie_audio = %d\nwindow_scale = %d\nfullscreen = %d\n"
-               "vsync = %d\nunlock_fps = %d\nlanguage = %s\n", g_settings.volume, g_settings.audio_out,
+               "vsync = %d\nfps = %s\nlanguage = %s\n", g_settings.volume, g_settings.audio_out,
             g_settings.reverb, g_settings.movie_audio, g_settings.window_scale, g_settings.fullscreen, g_settings.vsync,
-            g_settings.unlock_fps, g_settings.language);
+            fps, g_settings.language);
     fclose(f);
 }
 
