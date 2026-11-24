@@ -1,0 +1,22 @@
+# Never commit game data, keys or anything derived from the game's code
+*.nsp
+*.xci
+*.nca
+*.keys
+extracted/
+generated/
+build/
+mods/
+save/
+scratch_save/
+*.log
+run.out
+shot*.png
+ykwrecomp.ini
+gen_*.log
+runtime/gl/gl_thunks.c
+scratch_*/
+shots/
+__pycache__/
+*.pyc
+tools/*.log
