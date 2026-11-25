@@ -3,6 +3,10 @@
 // Usage: ykwrecomp [game folder with exefs/ and romfs/]   (default: extracted)
 #include <SDL3/SDL.h>
 #include <stdbool.h>
+#include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -95,6 +99,36 @@ static void boot(const char *root) {
     kernel_run_main(t, t->handle, 0, init_fn, fini_fn);  // nn::init::Start(thread_handle, args_region, init, fini)
 }
 
+static bool has_game(const char *root) {
+    char p[1024];
+    snprintf(p, sizeof p, "%s/exefs/main", root);
+    FILE *f = fopen(p, "rb");
+    if (f) fclose(f);
+    return f != NULL;
+}
+
+// No game folder given and none in the current folder (as when the exe is double-clicked in build\): work from the
+// exe's own folder - the one above it if that is build\, where save\, mods\ and ykwrecomp.ini live - and look for
+// the game files in extracted\ there or next to it. NULL: not found.
+static const char *find_game(void) {
+    if (has_game("extracted")) return "extracted";
+#ifdef _WIN32
+    char dir[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, dir, sizeof dir);
+    if (!n || n >= sizeof dir) return NULL;
+    char *slash = strrchr(dir, '\\');
+    if (!slash) return NULL;
+    *slash = 0;
+    slash = strrchr(dir, '\\');
+    if (slash && !_stricmp(slash + 1, "build")) *slash = 0;
+    if (!SetCurrentDirectoryA(dir)) return NULL;
+    LOG("[info] working folder: %s\n", dir);
+#endif
+    if (has_game("extracted")) return "extracted";
+    if (has_game("../extracted")) return "../extracted";
+    return NULL;
+}
+
 int main(int argc, char **argv) {
     plat_init();
 #ifdef _WIN32
@@ -102,9 +136,17 @@ int main(int argc, char **argv) {
 #else
     setvbuf(stderr, NULL, _IOLBF, 0);
 #endif
-    const char *root = "extracted";
+    const char *root = NULL;
     for (int i = 1; i < argc; i++)
         if (argv[i][0] != '-') root = argv[i];
+    if (!root) root = find_game();
+    if (!root) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "YKW Recomp",
+                                 "Game files not found.\n\nExpected an \"extracted\" folder (with exefs\\ and romfs\\) "
+                                 "next to the YKWRecomp folder or inside it, or its path as the first argument:\n"
+                                 "ykwrecomp.exe <game folder>", NULL);
+        return 1;
+    }
     LOG("[info] YKW Recomp, game files: %s\n", root);
     settings_load();
     extern void ui_init(void);
