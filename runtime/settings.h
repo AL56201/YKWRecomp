@@ -12,6 +12,7 @@ typedef struct {
     int window_scale;    // window size: 1280x720 times this
     bool fullscreen;
     bool vsync;
+    bool interp;         // frame interpolation: in-between images on the display's refreshes (gl/interp.c)
     double fps;          // frame rate (hle/framerate.c): 30 = the game's own, 0 = the display's refresh, or a number
     char language[8];    // the system language the game is told ("ja": the game's only text; a RomFS mod may translate)
 } Settings;

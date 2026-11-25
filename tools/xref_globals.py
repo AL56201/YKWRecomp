@@ -40,6 +40,8 @@ def main():
         page = adrp[rn][0]
         if (w & 0xFFC00000) == 0xF9400000:  # LDR x, [xn, #imm*8]
             tgt = page + ((w >> 10) & 0xFFF) * 8
+        elif (w & 0xFFC00000) in (0xBD400000, 0xB9400000, 0xBD000000, 0xB9000000):  # LDR/STR s / w, [xn, #imm*4]
+            tgt = page + ((w >> 10) & 0xFFF) * 4
         elif (w & 0xFFC00000) == 0x91000000:  # ADD x, xn, #imm
             tgt = page + ((w >> 10) & 0xFFF)
         else:

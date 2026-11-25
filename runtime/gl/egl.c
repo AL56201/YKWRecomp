@@ -292,19 +292,96 @@ static void dof_probe(uint64_t n) {
     bind_fb(GL_READ_FRAMEBUFFER, (GLuint)read_fb);
 }
 
+// (debug) YKW_SHIFT_LOG=<first tick>-<last tick>: each frame in that test-tick range, how far the picture moved
+// sideways since the frame before (a band through the 3D view, cross-correlated): measures the camera's motion as
+// shown, cheaply (one strip read back, nothing written)
+static void shift_log(void) {
+    static long lo = -2, hi;
+    if (lo == -2) { const char *e = getenv("YKW_SHIFT_LOG"); lo = -1; if (e && sscanf(e, "%ld-%ld", &lo, &hi) != 2) lo = -1; }
+    if (lo < 0) return;
+    extern uint64_t ykw_test_tick(void);
+    long t = (long)ykw_test_tick();
+    if (t < lo - 2 || t > hi) return;
+    extern bool fb0_read_bind(int *w, int *h);
+    static PFNGLBINDFRAMEBUFFERPROC bind_fb;
+    if (!bind_fb) bind_fb = (PFNGLBINDFRAMEBUFFERPROC)gl_proc("glBindFramebuffer");
+    GLint read_fb, pack;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fb);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &pack);
+    int w, h;
+    if (!fb0_read_bind(&w, &h)) return;
+    enum { ROWS = 48 };
+    static uint8_t px[1920 * ROWS * 4];
+    static float prof[2][1920];
+    static int have, cur;
+    if (w > 1920) w = 1920;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, h * 60 / 100, w, ROWS, GL_RGBA, GL_UNSIGNED_BYTE, px);  // (a band 60% up: the room, above the HUD)
+    glPixelStorei(GL_PACK_ALIGNMENT, pack);
+    bind_fb(GL_READ_FRAMEBUFFER, (GLuint)read_fb);
+    int wp = w * 70 / 100;  // (left of the minimap)
+    float *p = prof[cur], mean = 0;
+    for (int x = 0; x < wp; x++) {
+        float s = 0;
+        for (int y = 0; y < ROWS; y++) { const uint8_t *q = px + ((size_t)y * w + x) * 4; s += q[0] + 2 * q[1] + q[2]; }
+        p[x] = s, mean += s;
+    }
+    mean /= wp;
+    for (int x = 0; x < wp; x++) p[x] -= mean;
+    if (have) {
+        const float *a = prof[cur ^ 1];
+        int best = 0;
+        double bv = -1e300;
+        for (int s = -150; s <= 150; s++) {
+            double sum = 0;
+            for (int x = 160; x < wp - 160; x++) sum += (double)a[x] * p[x + s];
+            if (sum > bv) bv = sum, best = s;
+        }
+        if (t >= lo) LOG("[shift] tick %ld frame %llu: %d px\n", t, (unsigned long long)g_swaps + 1, best);
+    }
+    have = 1, cur ^= 1;
+}
+
+static uint64_t g_swap_end_ns;  // (debug: frame work time, YKW_WORK_LOG)
+
 HLE_FUNC("eglSwapBuffers", egl_swap_buffers) {
+    extern void vi_set_frame_thread(void);
+    vi_set_frame_thread();  // (hle/vi.c: interpolating, the vsync it asks for goes out once this thread waits)
+    {   // (debug) YKW_WORK_LOG=<ms>: each frame whose own work (from the last swap's end to this swap) took longer
+        static double over = -2;
+        if (over == -2) { const char *e = getenv("YKW_WORK_LOG"); over = e ? atof(e) : -1; }
+        if (over >= 0 && g_swap_end_ns) {
+            extern volatile uint64_t g_vsync_ns;
+            uint64_t now = plat_now_ns(), vs = g_vsync_ns;
+            double work = (now - g_swap_end_ns) / 1e6, since_vsync = vs > g_swap_end_ns ? (now - vs) / 1e6 : -1;
+            if (work > over)
+                LOG("[work] frame %llu: %.2f ms since the last swap (%.2f since its vsync)\n",
+                    (unsigned long long)g_swaps + 1, work, since_vsync);
+        }
+    }
+    shift_log();
     dof_probe(g_swaps + 1);
     shot_maybe(g_swaps + 1);
-    extern void fb0_present(void);  // (fb0.c: the game's image, scaled into the window)
-    fb0_present();
-    SDL_GL_SwapWindow(g_window);
+    extern bool interp_frame_end(uint64_t frame);  // (interp.c: the frame's recording ends here; true: it presented
+    bool interp_presented = interp_frame_end(g_swaps + 1);  //  the frame and its in-betweens itself, and told vi.c)
+    if (!interp_presented) {
+        extern void fb0_present(void);  // (fb0.c: the game's image, scaled into the window)
+        fb0_present();
+        SDL_GL_SwapWindow(g_window);
+    }
     extern bool vi_present_locked(void);
     extern void vi_presented(void);
-    if (vi_present_locked()) {  // (hle/vi.c: the game's vsync is this frame reaching the display)
+    if (!interp_presented && vi_present_locked()) {  // (hle/vi.c: the game's vsync is this frame reaching the display)
         glFinish();  // (returns once the swap is done: at the refresh it was shown at, not when it was queued)
         vi_presented();
     }
     uint64_t n = __atomic_add_fetch(&g_swaps, 1, __ATOMIC_RELEASE);
+    g_swap_end_ns = plat_now_ns();
+    {   // (debug) YKW_WATCH_ADDR with YKW_WATCH_AT=<frame>: the memory watch (dispatch.c) starts at that frame
+        static long at = -2;
+        if (at == -2) { const char *e = getenv("YKW_WATCH_AT"); at = e ? atol(e) : -1; }
+        if (at >= 0 && (long)n == at) { extern void watch_arm(void); watch_arm(); }
+    }
     {   // frames per second and frame-to-frame pacing, every 5 s (YKW_FPS_LOG=0: off). "uneven": frames that took more
         // than 1.5x the target frame time (each one is a visible stutter)
         static uint64_t t0, n0, last, uneven;

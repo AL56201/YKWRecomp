@@ -25,6 +25,19 @@ typedef struct { const char *name; HostFn fn; } GlThunk;
 extern const GlThunk gl_thunks[];
 extern const int gl_thunk_count;
 
+// A command's parameters, as the thunk reads them: kind 'i' int, 'l' 64-bit int, 'f' float, 'd' double, 'P' input
+// pointer (const), 'p' output pointer; loc 0-7 = x0-x7, 8-15 = v0-v7, 16+ = stack slot (loc - 16). ret: 'v' void, 'i',
+// 'f', 'd', 'p'. n = 0xff: not forwarded (callback arguments).
+typedef struct { char k; uint8_t loc; } GlParam;
+typedef struct { uint8_t n; char ret; GlParam p[16]; } GlSig;
+extern const GlSig gl_sigs[];
+
+// Frame interpolation (interp.c): every forwarded call passes through here first; true = don't make the call (a replay
+// skipping one that writes the game's memory, a deletion held until the frame's replays are done)
+extern volatile int g_gl_hook_on;
+bool gl_hook(int id, Cpu *c);
+#define GL_HOOK(id, c) (__builtin_expect(g_gl_hook_on, 0) && gl_hook(id, c))
+
 void *gl_proc(const char *name);         // the host driver's entry point (NULL: not there)
 void gl_missing(const char *name);       // logged once per name
 void gl_unsupported(const char *name);   // a command the thunks can't forward (callback arguments)

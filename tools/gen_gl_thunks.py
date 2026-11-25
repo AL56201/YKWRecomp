@@ -76,39 +76,53 @@ def emit(cmds, out):
     w('#include "gl_host.h"\n\n')
     names = sorted(cmds)
     emitted = []
+    sigs = []  # per command: (ret kind, [(kind char, location)]) - location 0-7 x regs, 8-15 v regs, 16+ stack slot
     for name in names:
         ret, rbase, params = cmds[name]
         kinds = [kind(ct, b) for ct, b, _ in params]
         fn = f'th_{name}'
+        tid = len(emitted)
         emitted.append(name)
         if 'cb' in kinds:
+            sigs.append(None)
             w(f'static void {fn}(Cpu *c) {{ (void)c; gl_unsupported("{name}"); }}\n')
             continue
         args, xi, vi, si = [], 0, 0, 0
+        sig = []
         for (ct, b, pn), k in zip(params, kinds):
             ht = host_type(ct)
+            if k == 'ptr':
+                sk = 'P' if ct.strip().startswith('const') else 'p'  # input / output pointer
+            else:
+                sk = {'f': 'f', 'd': 'd', 'i64': 'l'}.get(k, 'i')
             if k in ('f', 'd'):
                 if vi < 8:
+                    sig.append((sk, 8 + vi))
                     src = f'c->v[{vi}]'
                     vi += 1
                     args.append(f'gl_v{"f" if k == "f" else "d"}({src})')
                 else:
+                    sig.append((sk, 16 + si))
                     args.append(f'gl_s{"f" if k == "f" else "d"}(c, {si})')
                     si += 1
             else:
                 if xi < 8:
+                    sig.append((sk, xi))
                     src = f'c->x[{xi}]'
                     xi += 1
                 else:
+                    sig.append((sk, 16 + si))
                     src = f'gl_si(c, {si})'
                     si += 1
                 args.append(f'({ht})(uintptr_t){src}' if k == 'ptr' or ht in ('GLsync', 'GLeglImageOES')
                             else f'({ht}){src}')
         proto = ', '.join(host_type(ct) for ct, _, _ in params) or 'void'
         rk = 'void' if ret == 'void' else kind(ret, rbase)
+        sigs.append(({'void': 'v', 'f': 'f', 'd': 'd', 'ptr': 'p'}.get(rk, 'i'), sig))
         call = f'f({", ".join(args)})'
         w(f'static void {fn}(Cpu *c) {{\n')
         w(f'    GL_TRACE("{name}", c);\n')
+        w(f'    if (GL_HOOK({tid}, c)) return;\n')
         w(f'    typedef {ret} (APIENTRY *F)({proto});\n')
         w(f'    static F f;\n')
         w(f'    if (!f && !(f = (F)gl_proc("{name}"))) {{ gl_missing("{name}"); c->x[0] = 0; return; }}\n')
@@ -130,6 +144,16 @@ def emit(cmds, out):
         w(f'    {{"{name}", th_{name}}},\n')
     w('};\n')
     w(f'const int gl_thunk_count = {len(emitted)};\n')
+    # signatures, for recording and replaying calls (runtime/gl/interp.c): n = 0xff for a command the thunks don't forward
+    w('\nconst GlSig gl_sigs[] = {\n')
+    for s in sigs:
+        if s is None:
+            w('    {0xff, 0, {{0}}},\n')
+            continue
+        r, sig = s
+        ps = ', '.join(f"{{'{k}', {loc}}}" for k, loc in sig)
+        w(f"    {{{len(sig)}, '{r}', {{{ps}}}}},\n")
+    w('};\n')
 
 
 def main():

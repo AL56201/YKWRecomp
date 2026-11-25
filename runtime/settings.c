@@ -28,6 +28,7 @@ void settings_load(void) {
         else if (sscanf(line, " fullscreen = %d", &i) == 1) g_settings.fullscreen = i != 0;
         else if (sscanf(line, " vsync = %d", &i) == 1) g_settings.vsync = i != 0;
         else if (sscanf(line, " unlock_fps = %d", &i) == 1) { if (i) g_settings.fps = 0; }  // (older setting: display)
+        else if (sscanf(line, " interp = %d", &i) == 1) g_settings.interp = i != 0;
         else if (sscanf(line, " fps = %63s", s) == 1) g_settings.fps = !strcmp(s, "display") ? 0 : atof(s);
         else if (sscanf(line, " language = %7s", s) == 1) snprintf(g_settings.language, sizeof g_settings.language, "%s", s);
     }
@@ -41,9 +42,9 @@ void settings_save(void) {
     if (g_settings.fps == 0) snprintf(fps, sizeof fps, "display");
     else snprintf(fps, sizeof fps, "%g", g_settings.fps);
     fprintf(f, "volume = %.2f\naudio_out = %d\nreverb = %d\nmovie_audio = %d\nwindow_scale = %d\nfullscreen = %d\n"
-               "vsync = %d\nfps = %s\nlanguage = %s\n", g_settings.volume, g_settings.audio_out,
+               "vsync = %d\nfps = %s\ninterp = %d\nlanguage = %s\n", g_settings.volume, g_settings.audio_out,
             g_settings.reverb, g_settings.movie_audio, g_settings.window_scale, g_settings.fullscreen, g_settings.vsync,
-            fps, g_settings.language);
+            fps, g_settings.interp, g_settings.language);
     fclose(f);
 }
 

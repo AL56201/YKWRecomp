@@ -1,6 +1,7 @@
 // The window and the controls: SDL on the main thread. The game draws into the window from its own threads through
 // EGL (runtime/gl/egl.c); this thread only pumps events and keeps the input state the game polls (runtime/hle/input.c).
 #include <SDL3/SDL.h>
+#include <math.h>
 #include <stdatomic.h>
 
 #include "hle.h"
@@ -9,6 +10,8 @@
 
 extern SDL_Window *g_window;
 void egl_host_init(void);
+void ui_note_refresh(void);
+void ui_set_fullscreen(bool on);
 
 InputState g_input;
 
@@ -27,18 +30,49 @@ void ui_init(void) {
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     if (getenv("YKW_GL_DEBUG")) SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_DEBUG_FLAG);
     int s = g_settings.window_scale;
-    g_window = SDL_CreateWindow("YKW Recomp", 1280 * s, 720 * s,
-                                SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | (g_settings.fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
+    g_window = SDL_CreateWindow("YKW Recomp", 1280 * s, 720 * s, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (!g_window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
-    {   // the display's exact refresh rate (fps = display: hle/framerate.c)
-        extern double g_display_hz;
-        const SDL_DisplayMode *m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(g_window));
-        if (m && m->refresh_rate_numerator > 0 && m->refresh_rate_denominator > 0)
-            g_display_hz = (double)m->refresh_rate_numerator / m->refresh_rate_denominator;
-        else if (m && m->refresh_rate > 0) g_display_hz = m->refresh_rate;
-        LOG("[ui] display %dx%d at %.3f Hz\n", m ? m->w : 0, m ? m->h : 0, g_display_hz);
-    }
+    if (g_settings.fullscreen) ui_set_fullscreen(true);
+    else ui_note_refresh();
     egl_host_init();
+}
+
+static double mode_hz(const SDL_DisplayMode *m) {
+    if (m && m->refresh_rate_numerator > 0 && m->refresh_rate_denominator > 0)
+        return (double)m->refresh_rate_numerator / m->refresh_rate_denominator;
+    return m && m->refresh_rate > 0 ? m->refresh_rate : 60.0;
+}
+
+// The refresh rate the window is shown at now (g_display_hz: hle/framerate.c, hle/vi.c)
+void ui_note_refresh(void) {
+    extern double g_display_hz;
+    SDL_DisplayID d = SDL_GetDisplayForWindow(g_window);
+    const SDL_DisplayMode *fs = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) ? SDL_GetWindowFullscreenMode(g_window) : NULL;
+    const SDL_DisplayMode *m = fs ? fs : SDL_GetCurrentDisplayMode(d);
+    g_display_hz = mode_hz(m);
+    LOG("[ui] %s %dx%d at %.3f Hz\n", fs ? "fullscreen" : "display", m ? m->w : 0, m ? m->h : 0, g_display_hz);
+}
+
+// Fullscreen. At 60 fps on a display that isn't at 60 Hz, a 60 Hz mode at the desktop's resolution (exclusive
+// fullscreen), so every frame is shown once: in a window 60 frames on a 75 Hz display judder. Without such a mode, and
+// at 30 fps (which divides 60 but not 75 either), borderless fullscreen at the desktop's rate.
+void ui_set_fullscreen(bool on) {
+    extern bool ykw_fps_unlocked(void);
+    if (on) {
+        SDL_DisplayID d = SDL_GetDisplayForWindow(g_window);
+        const SDL_DisplayMode *desk = SDL_GetDesktopDisplayMode(d);
+        SDL_DisplayMode mode;
+        bool exclusive = false;
+        if (desk && fabs(mode_hz(desk) - 60.0) > 0.5 &&
+            SDL_GetClosestFullscreenDisplayMode(d, desk->w, desk->h, 60.0f, false, &mode) && fabs(mode_hz(&mode) - 60.0) < 0.5)
+            exclusive = SDL_SetWindowFullscreenMode(g_window, &mode);
+        if (!exclusive) SDL_SetWindowFullscreenMode(g_window, NULL);
+        if (desk && fabs(mode_hz(desk) - 60.0) > 0.5)
+            LOG("[ui] fullscreen: %s\n", exclusive ? "60 Hz mode" : "no 60 Hz mode at this resolution: the desktop's rate");
+    }
+    SDL_SetWindowFullscreen(g_window, on);
+    SDL_SyncWindow(g_window);
+    ui_note_refresh();
 }
 
 // Keyboard layout (positions, so it works on any keyboard language):
@@ -124,8 +158,12 @@ int ui_run(void) {
             case SDL_EVENT_KEY_DOWN:
                 if (e.key.scancode == SDL_SCANCODE_F11 || (e.key.scancode == SDL_SCANCODE_RETURN && (e.key.mod & SDL_KMOD_ALT))) {
                     g_settings.fullscreen = !g_settings.fullscreen;
-                    SDL_SetWindowFullscreen(g_window, g_settings.fullscreen);
+                    ui_set_fullscreen(g_settings.fullscreen);
                 }
+                break;
+            case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
+            case SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED:
+                ui_note_refresh();  // (another monitor, or its mode changed)
                 break;
             }
         }

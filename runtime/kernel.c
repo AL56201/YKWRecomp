@@ -349,6 +349,21 @@ static uint32_t block_current(int64_t timeout_ns) {
     if (timeout_ns >= 0) deadline(&ts, timeout_ns);
     t->wait_since = plat_now_ns();
     waitlist_add(t);
+    extern KThread *vi_frame_thread(void);
+    // (debug: the game's render thread's waits, and any wait called from the frame pacing, main+0x2bf850..0x2bf958)
+    bool trace = ENV("YKW_VSYNC_TRACE") != NULL;
+    WaitKind trace_kind = t->wait_kind;
+    uint64_t trace_addr = t->wait_addr, trace_lr = t->cpu.x[30], trace_c[6] = {0};
+    if (trace) {  // (the guest callers: the frame-pointer chain)
+        uint64_t fp = t->cpu.x[29];
+        bool pacing = false;
+        for (int i = 0; i < 6 && fp >= 0x1000000; i++) {
+            trace_c[i] = *(uint64_t *)(uintptr_t)(fp + 8);
+            if (trace_c[i] >= 0x70002bf850ull && trace_c[i] < 0x70002bf958ull) pacing = true;
+            fp = *(uint64_t *)(uintptr_t)fp;
+        }
+        trace = t == vi_frame_thread() || pacing;
+    }
     while (t->wait_kind != WAIT_NONE) {
         if (g_rt_unwind) {  // reboot: give up the wait (the thread unwinds when its svc returns)
             t->wait_kind = WAIT_NONE;
@@ -363,6 +378,15 @@ static uint32_t block_current(int64_t timeout_ns) {
         }
     }
     waitlist_remove(t);
+    if (trace) {
+        extern volatile uint64_t g_vsync_count;
+        LOG("[fw] thread %llu%s waited %.2f ms (kind %d addr %llx lr %llx < %llx < %llx < %llx < %llx < %llx < %llx), "
+            "vsync count %llu\n", (unsigned long long)t->id, t == vi_frame_thread() ? " (render)" : " (pacing)",
+            (plat_now_ns() - t->wait_since) / 1e6, (int)trace_kind, (unsigned long long)trace_addr,
+            (unsigned long long)trace_lr, (unsigned long long)trace_c[0], (unsigned long long)trace_c[1],
+            (unsigned long long)trace_c[2], (unsigned long long)trace_c[3], (unsigned long long)trace_c[4],
+            (unsigned long long)trace_c[5], (unsigned long long)g_vsync_count);
+    }
     return t->wait_result;
 }
 
@@ -565,11 +589,34 @@ static uint32_t svc_wait_synchronization(uint64_t handles_ptr, int32_t count, in
                 plat_print_backtrace();
             }
     }
+    uint64_t trace_t0 = plat_now_ns();
     for (;;) {
         for (int i = 0; i < count; i++) {
             KObject *o = handle_get(hs[i]);
             if (!o) { r = R_INVALID_HANDLE; goto out; }
-            if (o->signaled) { *index = i; r = R_OK; goto out; }
+            if (o->signaled) {
+                *index = i;
+                r = R_OK;
+                if (ENV("YKW_VSYNC_TRACE")) {  // (debug) which thread takes each vsync, and how long it waited
+                    extern uint32_t vi_vsync_handle(void);
+                    extern volatile uint64_t g_vsync_count;
+                    static int once;
+                    if (hs[i] == vi_vsync_handle() && t && !once++) {  // (the vsync handler: this->vtable[0x190])
+                        uint64_t fa = *(uint64_t *)(uintptr_t)t->cpu.x[29];
+                        uint64_t self = *(uint64_t *)(uintptr_t)(fa - 0x10), vt = *(uint64_t *)(uintptr_t)self;
+                        LOG("[vs] counter object %llx, vtable %llx, slot 0x190 = %llx\n", (unsigned long long)self,
+                            (unsigned long long)vt, (unsigned long long)*(uint64_t *)(uintptr_t)(vt + 0x190));
+                    }
+                    if (hs[i] == vi_vsync_handle())
+                        LOG("[vs] thread %llu took vsync %llu (waited %.2f ms, timeout %lld, lr %llx, callers %llx %llx)\n",
+                            (unsigned long long)(t ? t->id : 0), (unsigned long long)g_vsync_count,
+                            (plat_now_ns() - trace_t0) / 1e6, (long long)timeout,
+                            (unsigned long long)(t ? t->cpu.x[30] : 0),
+                            (unsigned long long)(t ? *(uint64_t *)(uintptr_t)(t->cpu.x[29] + 8) : 0),
+                            (unsigned long long)(t ? *(uint64_t *)(uintptr_t)(*(uint64_t *)(uintptr_t)t->cpu.x[29] + 8) : 0));
+                }
+                goto out;
+            }
         }
         if (timeout == 0) { r = R_TIMEOUT; goto out; }  // (before the cancel: a poll leaves it for the next real wait)
         if (t->cancel) { t->cancel = false; r = R_CANCELLED; goto out; }
@@ -588,6 +635,19 @@ static uint32_t svc_wait_synchronization(uint64_t handles_ptr, int32_t count, in
 out:
     pthread_mutex_unlock(&g_klock);
     return r;
+}
+
+// Is a thread blocked in WaitSynchronization on this handle (hle/vi.c: the game's vsync thread, back waiting)?
+bool kernel_handle_waited(uint32_t handle) {
+    bool found = false;
+    pthread_mutex_lock(&g_klock);
+    for (KThread *t = g_syncwaiters; t && !found; t = t->snext) {
+        const uint32_t *hs = (const uint32_t *)(uintptr_t)t->sync_handles;
+        for (int i = 0; i < t->sync_count; i++)
+            if (hs[i] == handle) { found = true; break; }
+    }
+    pthread_mutex_unlock(&g_klock);
+    return found;
 }
 
 // ------------------------------------------------------------------ debug output

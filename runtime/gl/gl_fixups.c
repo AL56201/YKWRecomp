@@ -7,6 +7,8 @@
 
 #include "gl_host.h"
 
+bool gl_hook_fixup(const char *name, HostFn fn, Cpu *c);
+
 typedef void (APIENTRY *ShaderSourceFn)(GLuint, GLsizei, const GLchar *const *, const GLint *);
 typedef void (APIENTRY *ShaderFn)(GLuint);
 typedef void (APIENTRY *GetivFn)(GLuint, GLenum, GLint *);
@@ -14,6 +16,7 @@ typedef void (APIENTRY *InfoLogFn)(GLuint, GLsizei, GLsizei *, GLchar *);
 
 static void fix_shader_source(Cpu *c) {
     GL_TRACE("glShaderSource", c);
+    if (gl_hook_fixup("glShaderSource", fix_shader_source, c)) return;  // (interp.c: the frame's recording)
     static ShaderSourceFn f;
     if (!f) f = (ShaderSourceFn)gl_proc("glShaderSource");
     GLuint sh = (GLuint)c->x[0];
@@ -181,6 +184,7 @@ static void fix_shader_source(Cpu *c) {
 
 static void fix_compile_shader(Cpu *c) {
     GL_TRACE("glCompileShader", c);
+    if (gl_hook_fixup("glCompileShader", fix_compile_shader, c)) return;  // (interp.c: the frame's recording)
     static ShaderFn f;
     static GetivFn getiv;
     static InfoLogFn info;
@@ -202,6 +206,7 @@ static void fix_compile_shader(Cpu *c) {
 
 static void fix_link_program(Cpu *c) {
     GL_TRACE("glLinkProgram", c);
+    if (gl_hook_fixup("glLinkProgram", fix_link_program, c)) return;  // (interp.c: the frame's recording)
     static ShaderFn f;
     static GetivFn getiv;
     static InfoLogFn info;

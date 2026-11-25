@@ -571,6 +571,8 @@ def main():
             sys.exit(f'{args.name}: {e}')
         import patches
         HOOKS, PATCHES = patches.HOOKS, patches.PATCHES
+        if hasattr(patches, 'extend'):  # (sites found by scanning the module's code)
+            patches.extend(m)
         label, build_id = game_addresses.VERSIONS[version]
         print(f'{args.name}: game version {label} (build {build_id[:16]}), address table {version}', file=sys.stderr)
     starts = m.boundaries()

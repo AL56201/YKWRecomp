@@ -77,13 +77,19 @@ license is CC BY-NC-ND).
 | `YKW_GL_NATIVE_SMOOTHSTEP=1`, `YKW_SHADER_CACHE=1`, `YKW_DIRECT_FB0=1` | Turn off the smoothstep fix / the fresh shader compiles / the offscreen framebuffer 0 |
 | `YKW_SHADER_SUB="from=>to;;..."` | Text replacements in the post-effect shader (experiments) |
 | `[shot] ... sharpness` (with `YKW_SHOT_EVERY`) | Mean neighbour luma difference in the middle of the 3D view: ~254 blurred, ~623 sharp in Nate's room |
-| `YKW_FPS=30` / `display` / `<n>` | Frame rate for this run (overrides `fps`); `[fps]` lines every 5 s with frame time, worst and stutters (`YKW_FPS_LOG=0`: off) |
-| `YKW_VSYNC_TIMER=1` | At `display`: pace with the plain timer instead of the presentations |
+| `YKW_FPS=30` / `60` | Frame rate for this run (overrides `fps`); `[fps]` lines every 5 s with frame time, worst and stutters (`YKW_FPS_LOG=0`: off) |
+| `YKW_INTERP=0` / `1` | Frame interpolation for this run (overrides `interp`) |
+| `YKW_VSYNC_TIMER=1` | On a 60 Hz display: pace with the plain timer instead of the presentations |
+| `YKW_INTERP_LOCK=1` | Interpolating: run the game on the display's clock instead of its own timer (two steady states; can drop to 30 fps) |
+| `YKW_PACING_RACE=1` | The game's own order in its vsync thread (wakes the frame pacing before counting the vsync: a hitch every 1-2 s) |
+| `YKW_SETTINGS=<file>` | Use another settings file |
+| `YKW_SHIFT_LOG=<a>-<b>`, `YKW_CAM_LOG=<a>-<b>` | Per frame in that test-tick range: how far the picture moved / the field camera's position, target and step |
+| `YKW_PRESENT_LOG=<a>-<b>`, `YKW_WORK_LOG=<ms>`, `YKW_VSYNC_TRACE=1` | Interpolation and pacing traces: each image's timing, frames that waited long, which threads take each vsync |
 | `YKW_TEST_CLOCK=1` | `YKW_INPUT` / `YKW_SHOT_EVERY` count thirtieths of a second instead of frames |
 | `YKW_INPUT=600:A,900-3000/90:PLUS` | Scripted presses at presented frames (held 6 frames) |
 | `YKW_SHOT_EVERY=<n>`, `YKW_SHOT_DIR=<dir>` | Save the game's image every n frames (half size, BMP) |
 
-## Status (2026-11-23)
+## Status (2026-11-25)
 
 Working: NSP decrypt + BKTR RomFS; full recompile of `main` + `sdk` with no unsupported instructions; boot through SDK
 and game initialisation; save file created; the game renders through host OpenGL (tested on an AMD Radeon GPU,
@@ -99,27 +105,30 @@ HUD, minimap and objectives, in English with the translation mod (6 minutes of s
 check needed `hle/ngc.c`: the real profanity filter reads console system data (NgWord, `0100000000000823`) that
 isn't in a game dump, and the SDK aborted when the name was confirmed.
 
-Frame rate: set `fps` in `ykwrecomp.ini` to `30` (the game's own, default), `display` (your monitor's refresh,
-recommended), or a number such as `60`, `120`, `144` (`YKW_FPS` overrides it for a run; `unlock_fps = 1` from
-older builds means `display`).
-- The engine waits a whole number of vsyncs per frame (2 = 30 fps at boot), runs one logic step per vsync (replaying
-  the ones a slow frame missed) and scales movement and timers by a time scale stored by its frame-rate setters at
-  `main+0x2beee0` / `main+0x2bf770` (`+0x7d0` base, `+0x7d4` interval, `+0x7dc` scale, read in 65 places).
-  `tools/patches.py` routes the interval and the scale through `hle/framerate.c`: unlocked, one frame per vsync, the
-  vsync at the target rate (`hle/vi.c`), and the scale × 60 ÷ rate, so the game keeps its speed at any rate.
-- `display`: the game's vsync is each frame reaching the monitor (`glFinish` after the swap), with a timer only as
-  the fallback for frames that miss. A plain timer at the same rate drifts against the real refresh.
-- Measured on a 75 Hz monitor, from a save, one run at a time:
-
-  | `fps` | measured | frame time | stutters per 5 s |
-  |---|---|---|---|
-  | `60` | 58–59 | 17.0 ± 2.4 ms | 6–11 (60 frames on 75 refreshes: every 4th shown twice) |
-  | `display` (75), plain timer | 72–73 | 13.8 ± 2.6 ms | 9–16 |
-  | `display` (75) | **75.0** | **13.33 ± 1.0–1.6 ms**, worst 21 ms | 1–5 small, no missed refresh |
-  | `144` (above the display: driver vsync off) | 133–135 | 7.4 ± 1.8 ms | ~50 |
-- Speed checked with clock-timed input (`YKW_TEST_CLOCK=1`, hold right for 2 s): the walk ends at the same spot at
-  30, 75 (timer and display-locked), 120 and 144 fps.
-- Above the display's rate the extra frames can't all be shown (vsync off, tearing); `display` is the smooth choice.
+Frame rate: set `fps` in `ykwrecomp.ini` to `30` (the game's own, default) or `60`; `interp = 1` adds frame
+interpolation for displays faster than 60 Hz. Recommended: `fps = 60`, `interp = 1`.
+- **60 is the ceiling.** The engine waits a whole number of vsyncs per frame (2 = 30 fps at boot; its frame-rate
+  setters at `main+0x2beee0` / `main+0x2bf770`: `+0x7d0` base, `+0x7d4` interval) and advances its logic a fixed
+  1/60 s per vsync. The float it also stores (`+0x7dc`) is read by no code, so above 60 vsyncs a second the game simply
+  runs fast (a walk hit the bedroom wall). `tools/patches.py` routes the interval clamp through `hle/framerate.c`,
+  which lowers it to one vsync a frame at `fps = 60`; anything above 60 (or `display`) is capped to 60.
+- **Fullscreen (F11 / Alt+Enter)** picks a 60 Hz mode when the desktop isn't 60 Hz, so every frame is shown once. On a
+  60 Hz display the game's vsync is each frame reaching the monitor (`glFinish` after the swap), with a timer only as
+  the fallback: a plain timer drifts against the real refresh.
+- **Frame interpolation** (`gl/interp.c`, `interp = 1`, on a display faster than 60 Hz): every frame's GL calls are
+  recorded through the GL thunks and replayed for the display's refreshes in between, with float uniforms and vertex
+  attributes blended between the last two frames (a replay at t = 1 is pixel-identical to the frame; frames with too
+  little in common, such as scene changes, are shown as they are). The game stays on its own 60 Hz timer; each image
+  waits for the desktop compositor's pass (`DwmFlush`: in a window the GL swap doesn't wait for the display), and
+  in-betweens that have fallen behind are skipped. Measured on a 75 Hz monitor, 75 s walking from a save: 3,353
+  images, 4 later than 20 ms, none later than 30, a steady 60 fps.
+- **The camera at 60 fps.** The field camera's follow runs once per vsync in a loop, but the loop skipped the follow
+  for an odd vsync count (`main+0x198958`): at 30 fps the count is always 2; at 60 it is 1, so the camera stood still
+  and jumped 40-150 px whenever a slow frame gave it a 2. Patched out (`CAM_FOLLOW_ODD_SITE`): at 60 fps the view
+  moves half as far per frame as at 30, at the same speed.
+- **A pacing race.** The game's vsync thread woke its frame pacing before it counted the vsync (`main+0x259ae0`,
+  `main+0x2bf978`); woken first, the pacing read the old count and slept a whole vsync more, every second or two on a
+  PC. The count now goes up first (`VSYNC_COUNT_FIRST_SITE`).
 
 Graphics notes:
 - **Depth of field blurred the whole 3D scene on AMD.** Two causes, both in `gl/gl_fixups.c`:
@@ -137,8 +146,8 @@ Graphics notes:
   mapping follows the same rectangle. `YKW_DIRECT_FB0=1` draws straight into the window as before.
 
 Next:
-1. Movie audio: only a video decoder is created for the opening; check whether its sound comes through CRI instead.
-2. Shaders on NVIDIA/Intel, internal resolution above 1080p, a frame-rate cap for `fps` above the display.
+1. Shaders on NVIDIA/Intel, internal resolution above 1080p.
+2. Interpolation: check other scenes (battles, menus, the overworld) for things the blend gets wrong.
 3. Play further with the English translation in `mods/` and note anything that depends on 1.4.0.
 
 ## References

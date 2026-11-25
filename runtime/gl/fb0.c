@@ -6,6 +6,8 @@
 
 #include "gl_host.h"
 
+bool gl_hook_fixup(const char *name, HostFn fn, Cpu *c);
+
 extern SDL_Window *g_window;
 
 #define MAX_CTX 16
@@ -118,6 +120,7 @@ bool fb0_read_bind(int *w, int *h) {
 // ---- the game's calls (gl_fixups.c registers these)
 void fb0_fix_bind_framebuffer(Cpu *c) {
     GL_TRACE("glBindFramebuffer", c);
+    if (gl_hook_fixup("glBindFramebuffer", fb0_fix_bind_framebuffer, c)) return;  // (interp.c: the frame's recording)
     load();
     GLuint name = (GLuint)c->x[1];
     p_bind_fb((GLenum)c->x[0], name ? name : fb0_current());
@@ -134,6 +137,7 @@ static bool bound_is_fb0(GLenum which) {
 
 void fb0_fix_draw_buffers(Cpu *c) {
     GL_TRACE("glDrawBuffers", c);
+    if (gl_hook_fixup("glDrawBuffers", fb0_fix_draw_buffers, c)) return;  // (interp.c: the frame's recording)
     load();
     GLsizei n = (GLsizei)c->x[0];
     const GLenum *bufs = (const GLenum *)(uintptr_t)c->x[1];
@@ -148,12 +152,14 @@ void fb0_fix_draw_buffers(Cpu *c) {
 
 void fb0_fix_draw_buffer(Cpu *c) {
     GL_TRACE("glDrawBuffer", c);
+    if (gl_hook_fixup("glDrawBuffer", fb0_fix_draw_buffer, c)) return;  // (interp.c: the frame's recording)
     GLenum b = (GLenum)c->x[0];
     glDrawBuffer(bound_is_fb0(GL_DRAW_FRAMEBUFFER_BINDING) ? map_buffer(b) : b);
 }
 
 void fb0_fix_read_buffer(Cpu *c) {
     GL_TRACE("glReadBuffer", c);
+    if (gl_hook_fixup("glReadBuffer", fb0_fix_read_buffer, c)) return;  // (interp.c: the frame's recording)
     GLenum b = (GLenum)c->x[0];
     glReadBuffer(bound_is_fb0(GL_READ_FRAMEBUFFER_BINDING) ? map_buffer(b) : b);
 }
@@ -161,6 +167,7 @@ void fb0_fix_read_buffer(Cpu *c) {
 // queries of the binding: the offscreen framebuffer is "0" to the game
 void fb0_fix_get_integerv(Cpu *c) {
     GL_TRACE("glGetIntegerv", c);
+    if (gl_hook_fixup("glGetIntegerv", fb0_fix_get_integerv, c)) return;  // (interp.c: the frame's recording)
     GLenum pname = (GLenum)c->x[0];
     GLint *out = (GLint *)(uintptr_t)c->x[1];
     glGetIntegerv(pname, out);

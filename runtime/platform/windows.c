@@ -46,8 +46,65 @@ static bool lazy_commit(uint64_t a) {
 
 static bool g_report_crashes;
 
+// Waits for the desktop compositor's next pass (its refresh): in a window the GL driver queues swaps without waiting
+// for the display, so this is when an image really reaches the screen. false: no compositor (nothing waited).
+bool plat_wait_composition(void) {
+    static HRESULT (WINAPI *flush)(void);
+    static int tried;
+    if (!tried) {
+        tried = 1;
+        HMODULE m = LoadLibraryA("dwmapi.dll");
+        if (m) flush = (HRESULT (WINAPI *)(void))(void *)GetProcAddress(m, "DwmFlush");
+    }
+    return flush && flush() == S_OK;
+}
+
+// (debug) plat_watch_write: a hardware write watch (debug register 0) on 4 bytes at addr, on the calling thread; each
+// distinct host code address that writes there is logged once with how many writes so far (map it with nm).
+#define WATCH_SET_CODE 0xE0DB0001u
+static LONG watch_hit(EXCEPTION_POINTERS *ep) {
+    static uint64_t rips[64];
+    static unsigned counts[64];
+    CONTEXT *cx = ep->ContextRecord;
+    if (!(cx->Dr6 & 1)) return EXCEPTION_CONTINUE_SEARCH;
+    cx->Dr6 = 0;
+    uint64_t rip = cx->Rip;
+    static unsigned total;
+    if (++total <= 6) {  // (the host call stack of the first few writes, as exe offsets: generated f_<guest address>s)
+        void *st[28];
+        USHORT k = CaptureStackBackTrace(0, 28, st, NULL);
+        char s[700];
+        int o = 0;
+        uint64_t base = (uint64_t)(uintptr_t)GetModuleHandleA(NULL);
+        for (USHORT j = 0; j < k && o < (int)sizeof s - 20; j++)
+            o += snprintf(s + o, sizeof s - o, " %llx", (unsigned long long)((uint64_t)(uintptr_t)st[j] - base));
+        fprintf(stderr, "[watch] stack:%s\n", s);
+    }
+    for (int i = 0; i < 64; i++) {
+        if (rips[i] == rip) { if (!(++counts[i] & (counts[i] - 1))) fprintf(stderr, "[watch] write from %llx (x%u)\n", (unsigned long long)rip, counts[i]); break; }
+        if (!rips[i]) {
+            rips[i] = rip, counts[i] = 1;
+            HMODULE m = GetModuleHandleA(NULL);
+            fprintf(stderr, "[watch] write from %llx (exe+%llx)\n", (unsigned long long)rip, (unsigned long long)(rip - (uint64_t)(uintptr_t)m));
+            break;
+        }
+    }
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+void plat_watch_write(uint64_t addr) {
+    ULONG_PTR a = (ULONG_PTR)addr;
+    RaiseException(WATCH_SET_CODE, 0, 1, &a);
+}
+
 static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    if (er->ExceptionCode == WATCH_SET_CODE) {
+        ep->ContextRecord->Dr0 = er->ExceptionInformation[0];
+        ep->ContextRecord->Dr7 = (ep->ContextRecord->Dr7 & ~0xF0003ull) | 1 | (1ull << 16) | (3ull << 18);
+        ep->ContextRecord->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (er->ExceptionCode == EXCEPTION_SINGLE_STEP) return watch_hit(ep);
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
     uint64_t fa = er->ExceptionInformation[1];
     // (not for an execute fault: on a read-write page, retrying it would fault again forever)
