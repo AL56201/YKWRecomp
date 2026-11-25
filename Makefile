@@ -25,6 +25,12 @@ all: $(B)/ykwrecomp.exe
 
 $(B)/ykwrecomp.exe: $(RT_OBJ) $(GEN_OBJ)
 	$(CC) -o $@ $(RT_OBJ) $(B)/gen/*/*.o $(LDFLAGS)
+	@$(MAKE) --no-print-directory dlls
+
+# The MSYS2 DLLs the exe loads (SDL3, FFmpeg and theirs), copied next to it so it starts without MSYS2 on PATH
+dlls:
+	@ldd $(B)/ykwrecomp.exe | awk '/\/ucrt64\// {print $$3}' | sort -u | xargs -r -I{} cp -u {} $(B)/
+	@echo "$$(ls $(B)/*.dll | wc -l) DLLs next to $(B)/ykwrecomp.exe"
 
 $(B)/gen/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h
 	@mkdir -p $(dir $@)
@@ -50,4 +56,4 @@ extract:
 clean:
 	rm -rf $(B)
 
-.PHONY: all gen gen-objs rt-objs extract clean
+.PHONY: all gen gen-objs rt-objs extract clean dlls

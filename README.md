@@ -32,7 +32,8 @@ Then, from an MSYS2 UCRT64 shell (or with `C:\msys64\ucrt64\bin;C:\msys64\usr\bi
 make gen PY=<windows python>      # ~25 s: generated/ (≈218 MB of C, 61k functions)
 make -j12 PY=<windows python>     # build/ykwrecomp.exe
 ```
-Run: `build\ykwrecomp.exe ..\extracted` with `C:\msys64\ucrt64\bin` on PATH (SDL3/FFmpeg DLLs).
+Run: `build\ykwrecomp.exe ..\extracted`. The build copies the MSYS2 DLLs it loads (SDL3, FFmpeg and theirs, ~100)
+next to the exe (`make dlls` on its own), so no PATH setup is needed to run it.
 
 The executable refuses an `exefs/main` other than the one it was generated from (build ID check), and
 `tools/gen.py` refuses unknown game versions (`tools/game_addresses.py`).
