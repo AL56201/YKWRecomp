@@ -83,6 +83,7 @@ license is CC BY-NC-ND).
 | `YKW_INTERP_LOCK=1` | Interpolating: run the game on the display's clock instead of its own timer (two steady states; can drop to 30 fps) |
 | `YKW_PACING_RACE=1` | The game's own order in its vsync thread (wakes the frame pacing before counting the vsync: a hitch every 1-2 s) |
 | `YKW_SETTINGS=<file>` | Use another settings file |
+| `YKW_SIM_HZ=<hz>` | Interpolation test: act as if the display ran at that rate (images paced to a timer, swaps not waiting for the real display); `YKW_INTERP_LOG=1` reports images/s and late ones |
 | `YKW_SHIFT_LOG=<a>-<b>`, `YKW_CAM_LOG=<a>-<b>` | Per frame in that test-tick range: how far the picture moved / the field camera's position, target and step |
 | `YKW_PRESENT_LOG=<a>-<b>`, `YKW_WORK_LOG=<ms>`, `YKW_VSYNC_TRACE=1` | Interpolation and pacing traces: each image's timing, frames that waited long, which threads take each vsync |
 | `YKW_TEST_CLOCK=1` | `YKW_INPUT` / `YKW_SHOT_EVERY` count thirtieths of a second instead of frames |
@@ -112,7 +113,8 @@ interpolation for displays faster than 60 Hz. Recommended: `fps = 60`, `interp =
   1/60 s per vsync. The float it also stores (`+0x7dc`) is read by no code, so above 60 vsyncs a second the game simply
   runs fast (a walk hit the bedroom wall). `tools/patches.py` routes the interval clamp through `hle/framerate.c`,
   which lowers it to one vsync a frame at `fps = 60`; anything above 60 (or `display`) is capped to 60.
-- **Fullscreen (F11 / Alt+Enter)** picks a 60 Hz mode when the desktop isn't 60 Hz, so every frame is shown once. On a
+- **Fullscreen (F11 / Alt+Enter)** keeps the desktop's rate when interpolating; without interpolation it picks a 60 Hz
+  mode when the desktop isn't 60 Hz, so every frame is shown once. On a
   60 Hz display the game's vsync is each frame reaching the monitor (`glFinish` after the swap), with a timer only as
   the fallback: a plain timer drifts against the real refresh.
 - **Frame interpolation** (`gl/interp.c`, `interp = 1`, on a display faster than 60 Hz): every frame's GL calls are
@@ -121,7 +123,9 @@ interpolation for displays faster than 60 Hz. Recommended: `fps = 60`, `interp =
   little in common, such as scene changes, are shown as they are). The game stays on its own 60 Hz timer; each image
   waits for the desktop compositor's pass (`DwmFlush`: in a window the GL swap doesn't wait for the display), and
   in-betweens that have fallen behind are skipped. Measured on a 75 Hz monitor, 75 s walking from a save: 3,353
-  images, 4 later than 20 ms, none later than 30, a steady 60 fps.
+  images, 4 later than 20 ms, none later than 30, a steady 60 fps. High-refresh displays, simulated
+  (`YKW_SIM_HZ`, images paced to a timer at that rate) on an AMD GPU: an in-between costs ~2.4 ms; 120 and 144 Hz
+  showed every refresh with none late, 240 Hz 239.8-240 images a second with 4 late in 30 s; the game a steady 60.
 - **The camera at 60 fps.** The field camera's follow runs once per vsync in a loop, but the loop skipped the follow
   for an odd vsync count (`main+0x198958`): at 30 fps the count is always 2; at 60 it is 1, so the camera stood still
   and jumped 40-150 px whenever a slow frame gave it a 2. Patched out (`CAM_FOLLOW_ODD_SITE`): at 60 fps the view

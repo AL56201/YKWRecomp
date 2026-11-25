@@ -51,24 +51,31 @@ void ui_note_refresh(void) {
     const SDL_DisplayMode *m = fs ? fs : SDL_GetCurrentDisplayMode(d);
     g_display_hz = mode_hz(m);
     LOG("[ui] %s %dx%d at %.3f Hz\n", fs ? "fullscreen" : "display", m ? m->w : 0, m ? m->h : 0, g_display_hz);
+    const char *sim = getenv("YKW_SIM_HZ");  // (test) a display this fast: gl/interp.c paces images to a timer
+    if (sim && atof(sim) > 0) {
+        g_display_hz = atof(sim);
+        LOG("[ui] simulating a %.0f Hz display (YKW_SIM_HZ)\n", g_display_hz);
+    }
 }
 
-// Fullscreen. At 60 fps on a display that isn't at 60 Hz, a 60 Hz mode at the desktop's resolution (exclusive
-// fullscreen), so every frame is shown once: in a window 60 frames on a 75 Hz display judder. Without such a mode, and
-// at 30 fps (which divides 60 but not 75 either), borderless fullscreen at the desktop's rate.
+// Fullscreen. Without frame interpolation, on a display that isn't at 60 Hz, a 60 Hz mode at the desktop's
+// resolution (exclusive fullscreen), so every frame is shown once: in a window 60 frames on a 75 Hz display judder.
+// Interpolating (gl/interp.c), or without such a mode, borderless fullscreen at the desktop's rate: every refresh gets
+// an image of its own (measured with YKW_SIM_HZ up to 240 Hz).
 void ui_set_fullscreen(bool on) {
-    extern bool ykw_fps_unlocked(void);
+    extern bool interp_enabled(void);
     if (on) {
         SDL_DisplayID d = SDL_GetDisplayForWindow(g_window);
         const SDL_DisplayMode *desk = SDL_GetDesktopDisplayMode(d);
         SDL_DisplayMode mode;
         bool exclusive = false;
-        if (desk && fabs(mode_hz(desk) - 60.0) > 0.5 &&
+        if (desk && fabs(mode_hz(desk) - 60.0) > 0.5 && !interp_enabled() &&
             SDL_GetClosestFullscreenDisplayMode(d, desk->w, desk->h, 60.0f, false, &mode) && fabs(mode_hz(&mode) - 60.0) < 0.5)
             exclusive = SDL_SetWindowFullscreenMode(g_window, &mode);
         if (!exclusive) SDL_SetWindowFullscreenMode(g_window, NULL);
         if (desk && fabs(mode_hz(desk) - 60.0) > 0.5)
-            LOG("[ui] fullscreen: %s\n", exclusive ? "60 Hz mode" : "no 60 Hz mode at this resolution: the desktop's rate");
+            LOG("[ui] fullscreen: %s\n", exclusive ? "60 Hz mode" : interp_enabled() ? "the desktop's rate (interpolating)"
+                                                                 : "no 60 Hz mode at this resolution: the desktop's rate");
     }
     SDL_SetWindowFullscreen(g_window, on);
     SDL_SyncWindow(g_window);

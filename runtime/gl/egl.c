@@ -124,7 +124,7 @@ HLE_FUNC("eglSwapInterval", egl_swap_interval) {
     // pacing - our vsync timer - keeps the rate)
     extern double ykw_vsync_hz(void), g_display_hz;
     bool above = ykw_vsync_hz() > g_display_hz + 0.5;
-    SDL_GL_SetSwapInterval(g_settings.vsync && !above ? (int)c->x[1] : 0);
+    SDL_GL_SetSwapInterval(g_settings.vsync && !above && !getenv("YKW_SIM_HZ") ? (int)c->x[1] : 0);
     c->x[0] = 1;
 }
 

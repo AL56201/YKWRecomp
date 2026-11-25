@@ -634,6 +634,8 @@ static bool shooting(void) {
 }
 
 static bool g_locked_shown;  // (the last image was shown at its own refresh: hle/vi.c's present lock)
+static uint64_t g_sim_missed;  // (YKW_SIM_HZ: refreshes an image came too late for)
+static double g_replay_ms;     // (the last in-between's replay, for YKW_PRESENT_LOG)
 
 // After a frame's last image: the vsync for the step the display's next refresh needs (hle/vi.c), unless the game
 // has had it. Only here, once a frame: asked for after each image, a frame spanning two steps had its two vsyncs
@@ -686,7 +688,17 @@ static void show(double game_t) {
             extern bool plat_wait_composition(void);
             const SDL_DisplayMode *fs = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) ? SDL_GetWindowFullscreenMode(g_window) : NULL;
             glFinish();
-            if (!fs) plat_wait_composition();
+            static int sim = -1;
+            if (sim < 0) sim = getenv("YKW_SIM_HZ") != NULL;
+            if (sim) {  // (test, YKW_SIM_HZ: the refreshes of a display that fast, on a timer; a late image starts over)
+                static uint64_t next;
+                uint64_t now = plat_now_ns(), period = (uint64_t)(1e9 / g_display_hz);
+                if (!next || now > next + period) {
+                    if (next) g_sim_missed++;
+                    next = now;
+                } else plat_sleep_until_ns(next);
+                next += period;
+            } else if (!fs) plat_wait_composition();
             extern void vi_image_shown(void);
             vi_image_shown();
             g_locked_shown = locked;
@@ -701,8 +713,9 @@ static void show(double game_t) {
         static double last_g;
         uint64_t now = plat_now_ns();
         if ((long)g_frame_now >= lo && (long)g_frame_now <= hi)
-            LOG("[present] frame %llu: +%.2f ms, game %.3f (+%.3f), swap %.2f ms\n", (unsigned long long)g_frame_now,
-                last ? (now - last) / 1e6 : 0.0, game_t, game_t - last_g, (now - t0) / 1e6);
+            LOG("[present] frame %llu: +%.2f ms, game %.3f (+%.3f), swap %.2f ms, replay %.2f ms, missed %llu\n",
+                (unsigned long long)g_frame_now, last ? (now - last) / 1e6 : 0.0, game_t, game_t - last_g,
+                (now - t0) / 1e6, g_replay_ms, (unsigned long long)g_sim_missed);
         last = now, last_g = game_t;
     }
 }
@@ -734,7 +747,14 @@ static bool present_images(Frame *f, Frame *prev, double steps) {
             own_shown = true;
             mid_drawn = false;
         } else {
+            uint64_t r0 = plat_now_ns();
             replay_t(f, prev, (float)t);
+            static int timing = -1;
+            if (timing < 0) timing = getenv("YKW_PRESENT_LOG") != NULL;
+            if (timing) {  // (YKW_PRESENT_LOG: the replay's own time, not the wait for its refresh - costs the overlap)
+                glFinish();
+                g_replay_ms = (plat_now_ns() - r0) / 1e6;
+            }
             show(from + t * steps);
             g_mids++;
             mid_drawn = true;
@@ -825,10 +845,11 @@ bool interp_frame_end(uint64_t frame) {
     if (getenv("YKW_INTERP_LOG") && now - t_log > 5000000000ull) {
         if (t_log && frames)
             LOG("[interp] %llu frames: %llu calls, %llu KB a frame, %llu not replayable; %.1f images/s, %llu in-betweens, "
-                "%llu cuts\n", (unsigned long long)frames, (unsigned long long)(calls / frames),
+                "%llu cuts, %llu late (YKW_SIM_HZ)\n", (unsigned long long)frames, (unsigned long long)(calls / frames),
                 (unsigned long long)(bytes / frames >> 10), (unsigned long long)bad_frames,
-                g_images * 1e9 / (double)(now - t_log), (unsigned long long)g_mids, (unsigned long long)g_cuts);
-        t_log = now, frames = calls = bytes = bad_frames = 0, g_images = g_mids = g_cuts = 0;
+                g_images * 1e9 / (double)(now - t_log), (unsigned long long)g_mids, (unsigned long long)g_cuts,
+                (unsigned long long)g_sim_missed);
+        t_log = now, frames = calls = bytes = bad_frames = 0, g_images = g_mids = g_cuts = 0, g_sim_missed = 0;
     }
     flush_deletes(f);
     g_cur ^= 1;
