@@ -1,5 +1,6 @@
 // Windows host layer (runtime/platform.h).
 #include <windows.h>
+#include <dwmapi.h>  // (DWM_TIMING_INFO only: the functions are loaded at run time, no dwmapi link)
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,6 +58,34 @@ bool plat_wait_composition(void) {
         if (m) flush = (HRESULT (WINAPI *)(void))(void *)GetProcAddress(m, "DwmFlush");
     }
     return flush && flush() == S_OK;
+}
+
+static LARGE_INTEGER qpf;  // (the performance counter's rate: plat_now_ns)
+
+// The desktop compositor's next pass (its vblank) after the time t (plat_now_ns), from its own timing; 0: unknown
+// (no compositor, or exclusive fullscreen)
+uint64_t plat_next_composition_ns(uint64_t t) {
+    static HRESULT (WINAPI *get)(HWND, DWM_TIMING_INFO *);
+    static int tried, failed_logged;
+    if (!tried) {
+        tried = 1;
+        HMODULE m = LoadLibraryA("dwmapi.dll");
+        if (m) get = (HRESULT (WINAPI *)(HWND, DWM_TIMING_INFO *))(void *)GetProcAddress(m, "DwmGetCompositionTimingInfo");
+    }
+    if (!get) return 0;
+    DWM_TIMING_INFO ti;
+    memset(&ti, 0, sizeof ti);
+    ti.cbSize = sizeof ti;  // (a packed structure: the header's, not a copy)
+    HRESULT hr = get(NULL, &ti);
+    if (hr != S_OK || !ti.qpcRefreshPeriod || !ti.qpcVBlank) {
+        if (!failed_logged++) fprintf(stderr, "[present] compositor timing unavailable (%#lx): waiting for its next pass\n", (unsigned long)hr);
+        return 0;
+    }
+    if (!qpf.QuadPart) QueryPerformanceFrequency(&qpf);
+    uint64_t vb = (uint64_t)((unsigned __int128)ti.qpcVBlank * 1000000000u / (uint64_t)qpf.QuadPart);
+    uint64_t per = (uint64_t)((unsigned __int128)ti.qpcRefreshPeriod * 1000000000u / (uint64_t)qpf.QuadPart);
+    if (t <= vb) return vb;
+    return vb + ((t - vb) / per + 1) * per;
 }
 
 // (debug) plat_watch_write: a hardware write watch (debug register 0) on 4 bytes at addr, on the calling thread; each

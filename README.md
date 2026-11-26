@@ -129,6 +129,11 @@ interpolation for displays faster than 60 Hz. Recommended: `fps = 60`, `interp =
   images, 4 later than 20 ms, none later than 30, a steady 60 fps. High-refresh displays, simulated
   (`YKW_SIM_HZ`, images paced to a timer at that rate) on an AMD GPU: an in-between costs ~2.4 ms; 120 and 144 Hz
   showed every refresh with none late, 240 Hz 239.8-240 images a second with 4 late in 30 s; the game a steady 60.
+  Each in-between is a whole replay of the frame on the GPU (outdoors 5-7 ms, the CPU's part ~0.2 ms); where the GPU
+  can't fit both, a frame that takes more than one vsync pauses the in-betweens for half a second, so the game keeps
+  its 60 (walking outdoors by Triangle Park: 58-60 fps, against dips to 53 without the pause).
+  In-betweens pair each draw with the same object's in the frame before, and don't blend values whose number of
+  uploads changed from one frame to the next (the minimap, redrawn about once a second, flickered zoomed in).
 - **The camera at 60 fps.** The field camera's follow runs once per vsync in a loop, but the loop skipped the follow
   for an odd vsync count (`main+0x198958`): at 30 fps the count is always 2; at 60 it is 1, so the camera stood still
   and jumped 40-150 px whenever a slow frame gave it a 2. Patched out (`CAM_FOLLOW_ODD_SITE`): at 60 fps the view

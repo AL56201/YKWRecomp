@@ -280,7 +280,7 @@ static void assign_occ(Frame *f) {
     }
 }
 
-static void match_frames(Frame *cur, Frame *prev, int *matched, int *blendable) {
+static void match_by_order(Frame *cur, Frame *prev, int *matched, int *blendable) {
     *matched = *blendable = 0;
     uint32_t need = 1;
     while (need < prev->n * 2 + 16) need <<= 1;
@@ -293,17 +293,162 @@ static void match_frames(Frame *cur, Frame *prev, int *matched, int *blendable) 
         while (g_tab[i].key) i = (i + 1) & (need - 1);
         g_tab[i] = (KeyEnt){r->key, r->occ, k};
     }
+    // how many of each key the frame before had (its highest occurrence + 1), and this frame: a key uploaded a
+    // different number of times has an extra or a missing draw somewhere, and its order can't be trusted (the
+    // minimap, redrawn about once a second, put a zoomed-in map in that second's in-betweens). Those calls count as
+    // matched (no cut for it) but aren't blended, unless the draw pairing (match_frames) finds their own.
+    static uint64_t *cnt_key;
+    static uint32_t *cnt_prev, *cnt_cur, cnt_cap;
+    uint32_t cneed = 1;
+    while (cneed < (prev->n + cur->n) * 2 + 16) cneed <<= 1;
+    if (cneed > cnt_cap) {
+        cnt_cap = cneed;
+        cnt_key = realloc(cnt_key, sizeof *cnt_key * cneed);
+        cnt_prev = realloc(cnt_prev, sizeof *cnt_prev * cneed), cnt_cur = realloc(cnt_cur, sizeof *cnt_cur * cneed);
+    }
+    memset(cnt_key, 0, sizeof *cnt_key * cneed);
+    for (int fr = 0; fr < 2; fr++) {
+        Frame *f = fr ? cur : prev;
+        for (uint32_t k = 0; k < f->n; k++) {
+            const Rec *r = &f->recs[k];
+            if (!(r->flags & (REC_BLEND_V | REC_BLEND_P))) continue;
+            uint32_t i = slot_of(r->key, 0, cneed - 1);
+            while (cnt_key[i] && cnt_key[i] != r->key) i = (i + 1) & (cneed - 1);
+            if (!cnt_key[i]) cnt_key[i] = r->key, cnt_prev[i] = cnt_cur[i] = 0;
+            uint32_t *c = fr ? &cnt_cur[i] : &cnt_prev[i];
+            if (r->occ + 1 > *c) *c = r->occ + 1;
+        }
+    }
     for (uint32_t k = 0; k < cur->n; k++) {
         Rec *r = &cur->recs[k];
         r->match = -1;
         if (!(r->flags & (REC_BLEND_V | REC_BLEND_P))) continue;
         (*blendable)++;
+        uint32_t ci = slot_of(r->key, 0, cneed - 1);
+        while (cnt_key[ci] != r->key) ci = (ci + 1) & (cneed - 1);
+        bool same_count = cnt_prev[ci] == cnt_cur[ci];
         for (uint32_t i = slot_of(r->key, r->occ, need - 1); g_tab[i].key; i = (i + 1) & (need - 1))
             if (g_tab[i].key == r->key && g_tab[i].occ == r->occ) {
                 const Rec *p = &prev->recs[g_tab[i].rec];
-                if ((r->flags & REC_BLEND_V) || p->psize[0] == r->psize[0]) r->match = (int32_t)g_tab[i].rec, (*matched)++;
+                if ((r->flags & REC_BLEND_V) || p->psize[0] == r->psize[0]) {
+                    (*matched)++;
+                    if (same_count) r->match = (int32_t)g_tab[i].rec;
+                }
                 break;
             }
+    }
+}
+
+// By order alone, the n-th upload of a key pairs with the n-th the frame before - but the game sorts its draws (by
+// depth, as the camera moves), and objects drawn with the same program, such as a row of bushes, swapped places in
+// that order from one frame to the next: in-betweens blended one bush's bones with another's and drew it out of
+// place, a flicker in every in-between while the camera moved up or down (Uptown, by Triangle Park). So the frame is
+// cut into draws (the calls up to and including a glDraw*), draws of the same call and arguments (the same mesh) are
+// paired with the nearest by their uniform values (objects move little in a frame), and each upload blends with its
+// own in the paired draw. Uploads outside such a pairing keep the order match. YKW_INTERP_ORDER_MATCH=1: no draw
+// pairing (the order match, with its count check, only). Measured walking up and down by Triangle Park: before these
+// two, 2-8 in-betweens a run stood out from both neighbours (whole image, by 10-25); after, none in 8 runs.
+typedef struct { uint32_t first, end; uint64_t sig; int32_t match; float fp[16]; } Seg;
+static Seg *g_segs[2];
+static uint32_t g_seg_cap[2];
+static const float *rec_floats(const Frame *f, const Rec *r, float tmp[4], size_t *n);
+
+static uint32_t cut_segments(Frame *f, int which) {
+    uint32_t n = 0, first = 0;
+    for (uint32_t k = 0; k < f->n; k++) {
+        const Rec *r = &f->recs[k];
+        if (strncmp(gl_thunks[r->id].name, "glDraw", 6)) continue;
+        if (n == g_seg_cap[which]) g_segs[which] = realloc(g_segs[which], sizeof(Seg) * (g_seg_cap[which] = g_seg_cap[which] * 2 + 64));
+        uint64_t h = 1469598103934665603ull, parts[6] = {r->id, r->prog, r->x[0], r->x[1], r->x[2], r->x[3]};
+        for (int i = 0; i < 6; i++) h = (h ^ parts[i]) * 1099511628211ull;
+        Seg *s = &g_segs[which][n++];
+        *s = (Seg){first, k + 1, h, -1, {0}};
+        // the draw's fingerprint: its uniform values (the first 64 of each upload) folded into 16 sums, in order
+        uint32_t j = 0;
+        for (uint32_t q = first; q <= k; q++) {
+            const Rec *u = &f->recs[q];
+            if (!(u->flags & (REC_BLEND_V | REC_BLEND_P))) continue;
+            float tmp[4];
+            size_t cnt;
+            const float *v = rec_floats(f, u, tmp, &cnt);
+            for (size_t e = 0; e < cnt && e < 64; e++, j++)
+                if (!isnan(v[e])) s->fp[j & 15] += v[e];
+        }
+        first = k + 1;
+    }
+    return n;
+}
+
+// the call in segment s of frame f with this key, as the occ-th of its key in the segment; -1: none
+static int32_t seg_find(const Frame *f, const Seg *s, uint64_t key, int occ) {
+    for (uint32_t k = s->first; k < s->end; k++)
+        if (f->recs[k].key == key && (f->recs[k].flags & (REC_BLEND_V | REC_BLEND_P)) && occ-- == 0) return (int32_t)k;
+    return -1;
+}
+
+static const float *rec_floats(const Frame *f, const Rec *r, float tmp[4], size_t *n) {
+    if (r->flags & REC_BLEND_P) { *n = r->payload[0] == ~0u ? 0 : r->psize[0] / 4; return (const float *)(f->arena + r->payload[0]); }
+    for (int i = 0; i < 4; i++) { uint32_t u = (uint32_t)r->v[i]; memcpy(&tmp[i], &u, 4); }
+    *n = 4;
+    return tmp;
+}
+
+// how far apart two draws' uniform values are: their fingerprints (cut_segments; comparing every value of every
+// pair cost ~10 fps outdoors)
+static double seg_cost(const Seg *a, const Seg *b) {
+    double cost = 0;
+    for (int i = 0; i < 16; i++) cost += fabsf(a->fp[i] - b->fp[i]);
+    return cost;
+}
+
+static void match_frames(Frame *cur, Frame *prev, int *matched, int *blendable) {
+    match_by_order(cur, prev, matched, blendable);
+    if (getenv("YKW_INTERP_ORDER_MATCH")) return;
+    uint32_t nc = cut_segments(cur, 0), np = cut_segments(prev, 1);
+    Seg *sc = g_segs[0], *sp = g_segs[1];
+    static bool *taken;
+    static uint32_t taken_cap;
+    if (np > taken_cap) taken = realloc(taken, (taken_cap = np * 2));
+    memset(taken, 0, np);
+    // each group of draws with the same signature: greedy nearest pairs (groups past 48 draws keep the order match)
+    for (uint32_t i = 0; i < nc; i++) {
+        if (sc[i].match != -1 || sc[i].sig == 0) continue;
+        uint64_t sig = sc[i].sig;
+        uint32_t gc[48], gp[48], ncg = 0, npg = 0;
+        bool big = false;
+        for (uint32_t k = i; k < nc; k++) if (sc[k].sig == sig) { if (ncg == 48) { big = true; break; } gc[ncg++] = k; }
+        for (uint32_t k = 0; k < np && !big; k++) if (sp[k].sig == sig) { if (npg == 48) { big = true; break; } gp[npg++] = k; }
+        for (uint32_t k = i; k < nc; k++) if (sc[k].sig == sig) sc[k].match = -2;  // (this group is done)
+        if (big || ncg < 2 || !npg) continue;
+        static double cost[48][48];
+        for (uint32_t a = 0; a < ncg; a++)
+            for (uint32_t b = 0; b < npg; b++) cost[a][b] = seg_cost(&sc[gc[a]], &sp[gp[b]]);
+        bool done_c[48] = {0}, done_p[48] = {0};
+        for (uint32_t round = 0; round < ncg && round < npg; round++) {
+            double best = 1e300;
+            int ba = -1, bb = -1;
+            for (uint32_t a = 0; a < ncg; a++)
+                for (uint32_t b = 0; b < npg; b++)
+                    if (!done_c[a] && !done_p[b] && cost[a][b] < best) best = cost[a][b], ba = (int)a, bb = (int)b;
+            if (ba < 0 || best >= 1e6) break;
+            done_c[ba] = done_p[bb] = true;
+            sc[gc[ba]].match = (int32_t)gp[bb];
+        }
+    }
+    // the uploads of paired draws: each to its own in the paired draw
+    for (uint32_t i = 0; i < nc; i++) {
+        if (sc[i].match < 0) continue;
+        const Seg *b = &sp[sc[i].match];
+        for (uint32_t k = sc[i].first; k < sc[i].end; k++) {
+            Rec *r = &cur->recs[k];
+            if (!(r->flags & (REC_BLEND_V | REC_BLEND_P))) continue;
+            int occ = 0;
+            for (uint32_t j = sc[i].first; j < k; j++) occ += cur->recs[j].key == r->key && (cur->recs[j].flags & (REC_BLEND_V | REC_BLEND_P));
+            int32_t q = seg_find(prev, b, r->key, occ);
+            if (q < 0 || ((r->flags & REC_BLEND_P) && prev->recs[q].psize[0] != r->psize[0])) continue;
+            if (r->match < 0) (*matched)++;
+            r->match = q;
+        }
     }
 }
 
@@ -318,15 +463,33 @@ static bool jumps(float a, float b) {
 static float *g_tmp;
 static size_t g_tmp_cap;
 
+// (debug) YKW_INTERP_NOBLEND=<program>,<program>...: those programs' values aren't blended (the frame's own)
+static bool noblend(uint32_t prog) {
+    static uint32_t list[32];
+    static int n = -1;
+    if (n < 0) {
+        n = 0;
+        const char *e = getenv("YKW_INTERP_NOBLEND");
+        for (; e && *e && n < 32; e++) {
+            list[n++] = (uint32_t)strtoul(e, (char **)&e, 10);
+            if (!*e) break;
+        }
+    }
+    for (int i = 0; i < n; i++)
+        if (list[i] == prog) return true;
+    return false;
+}
+
 static void replay_t(Frame *f, Frame *prev, float t) {
     uint64_t stack[16];
     Cpu c;
-    bool blend = prev && t < 0.999f;
+    bool blend_all = prev && t < 0.999f;
     g_replaying = 1;
     for (uint32_t k = 0; k < f->n; k++) {
         const Rec *r = &f->recs[k];
         if (r->flags & REC_SKIP) continue;
         const GlSig *s = &gl_sigs[r->id];
+        bool blend = blend_all && !noblend(r->prog);
         memset(&c, 0, sizeof c);
         memcpy(c.x, r->x, sizeof r->x);
         for (int i = 0; i < 8; i++) c.v[i] = r->v[i];
@@ -621,7 +784,7 @@ extern double g_display_hz;
 extern void fb0_present(void);
 static double g_step;     // logic steps presented so far
 static uint64_t g_shown;  // the display refresh shown last (its index)
-static uint64_t g_images, g_mids, g_cuts;
+static uint64_t g_images, g_mids, g_cuts, g_backoffs;
 
 static long g_shot_at = -2;
 static uint64_t g_frame_now, g_shot_frame;  // g_shot_frame: (YKW_TEST_CLOCK) the frame the shot tick fell on
@@ -666,30 +829,60 @@ static void request_next(void) {
 
 static void show(double game_t) {
     extern SDL_Window *g_window;
-    if (shooting()) {
-        char tag[48];
-        snprintf(tag, sizeof tag, "f%llu_i%llu", (unsigned long long)g_frame_now, (unsigned long long)g_shown);
+    static long all_lo = -2, all_hi;  // (debug) YKW_SAVE_ALL=<first tick>-<last tick>: every image in that test-tick range
+    if (all_lo == -2) { const char *e = getenv("YKW_SAVE_ALL"); all_lo = -1; if (e && sscanf(e, "%ld-%ld", &all_lo, &all_hi) != 2) all_lo = -1; }
+    extern uint64_t ykw_test_tick(void);
+    long tick_now = all_lo >= 0 ? (long)ykw_test_tick() : 0;
+    if (shooting() || (all_lo >= 0 && tick_now >= all_lo && tick_now <= all_hi)) {
+        char tag[64];
+        snprintf(tag, sizeof tag, "i%llu_f%llu_g%.3f", (unsigned long long)g_shown, (unsigned long long)g_frame_now, game_t);
         save_image(tag);
+    }
+    extern void flicker_probe(double game_t);
+    flicker_probe(game_t);
+    extern bool vi_present_locked(void);
+    bool locked = vi_present_locked();
+    static int sim = -1;
+    if (sim < 0) sim = getenv("YKW_SIM_HZ") != NULL;
+    const SDL_DisplayMode *fs = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) ? SDL_GetWindowFullscreenMode(g_window) : NULL;
+    // (YKW_PRESENT_PREWAIT=1, experiment: wait before an image only until the compositor has taken the one before,
+    // not after it. Measured outdoors walking: 42-51 fps against 53-57 waiting after each image, so not the default.)
+    static int prewait = -1;
+    if (prewait < 0) prewait = getenv("YKW_PRESENT_PREWAIT") != NULL;
+    bool pre_wait = prewait && !locked && g_settings.vsync && !sim && !fs;
+    static uint64_t last_present;
+    if (pre_wait && last_present) {
+        extern uint64_t plat_next_composition_ns(uint64_t t);
+        uint64_t t = plat_next_composition_ns(last_present);
+        if (t) {
+            t += 500000;  // (just past the pass)
+            if (plat_now_ns() < t && t - plat_now_ns() < 50000000) plat_sleep_until_ns(t);
+        } else {
+            extern bool plat_wait_composition(void);
+            plat_wait_composition();
+        }
     }
     fb0_present();
     uint64_t t0 = plat_now_ns();
     SDL_GL_SwapWindow(g_window);
     g_images++;
-    {   // Locked to the display (hle/vi.c): each image waits for its refresh, and once a frame's last image is up the
+    if (pre_wait) {
+        glFinish();  // (the image is done: the pass it was ready for is the next one)
+        last_present = plat_now_ns();
+        extern void vi_image_shown(void);
+        vi_image_shown();
+        g_locked_shown = false;
+    } else {   // Locked to the display (hle/vi.c): each image waits for its refresh, and once a frame's last image is up the
         // display asks for the game frame its next refresh needs (request_next). Refresh i shows game time i / r, in
         // logic steps = vsyncs (present_images); the vsyncs asked for are counted against all the game has had (the
         // vi.c timer's in a stall included), so after a slow frame the game takes the steps it missed.
-        extern bool vi_present_locked(void);
-        bool locked = vi_present_locked();
+        last_present = 0;
         if (locked || g_settings.vsync) {
             // (exclusive fullscreen: the swap is done at the refresh it was shown at. In a window the driver queues
             // swaps and returns at once, several in a row and then a long wait: there the compositor's pass is the
             // refresh)
             extern bool plat_wait_composition(void);
-            const SDL_DisplayMode *fs = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) ? SDL_GetWindowFullscreenMode(g_window) : NULL;
             glFinish();
-            static int sim = -1;
-            if (sim < 0) sim = getenv("YKW_SIM_HZ") != NULL;
             if (sim) {  // (test, YKW_SIM_HZ: the refreshes of a display that fast, on a timer; a late image starts over)
                 static uint64_t next;
                 uint64_t now = plat_now_ns(), period = (uint64_t)(1e9 / g_display_hz);
@@ -751,8 +944,9 @@ static bool present_images(Frame *f, Frame *prev, double steps) {
             replay_t(f, prev, (float)t);
             static int timing = -1;
             if (timing < 0) timing = getenv("YKW_PRESENT_LOG") != NULL;
-            if (timing) {  // (YKW_PRESENT_LOG: the replay's own time, not the wait for its refresh - costs the overlap)
-                glFinish();
+            if (timing) {  // (YKW_PRESENT_LOG: the replay's own time, not the wait for its refresh - costs the overlap;
+                           //  YKW_REPLAY_CPU=1: only the CPU's, the calls issued, no wait for the GPU)
+                if (!getenv("YKW_REPLAY_CPU")) glFinish();
                 g_replay_ms = (plat_now_ns() - r0) / 1e6;
             }
             show(from + t * steps);
@@ -785,9 +979,19 @@ bool interp_frame_end(uint64_t frame) {
     uint64_t vs = __atomic_load_n(&g_vsync_count, __ATOMIC_ACQUIRE);
     double steps = last_vsyncs && vs > last_vsyncs && vs - last_vsyncs <= 8 ? (double)(vs - last_vsyncs) : 1.0;
     last_vsyncs = vs;
+    // The game's own frame rate comes first. Each in-between is a whole replay of the frame on the GPU (outdoors 5-7
+    // ms, up to 11, against ~2.4 indoors; the CPU's part 0.2 ms), and at 75 Hz nearly every frame has one: where the
+    // GPU can't fit both in a frame, the game missed vsyncs (53-57 fps walking outdoors, a stutter; 60 steady without
+    // in-betweens). So a frame that took more than one vsync stops the in-betweens for half a second - the game's own
+    // frames only, as without interpolation - and then they come back. YKW_INTERP_NO_BACKOFF=1: never.
+    static int backoff;
+    static int no_backoff = -1;
+    if (no_backoff < 0) no_backoff = getenv("YKW_INTERP_NO_BACKOFF") != NULL;
+    if (steps >= 2 && !no_backoff && prev->n) backoff = 30, g_backoffs++;
+    if (backoff > 0) backoff--;
     if (ykw_fps_unlocked() && g_display_hz > 60.5 && !getenv("YKW_INTERP_NO_PRESENT")) {
         int matched = 0, blendable = 0;
-        bool cut = f->bad || prev->bad || !prev->n;
+        bool cut = f->bad || prev->bad || !prev->n || backoff > 0;
         if (!cut) {
             match_frames(f, prev, &matched, &blendable);
             cut = !blendable || matched < blendable * 8 / 10;  // (a scene change: too little in common)
@@ -845,11 +1049,11 @@ bool interp_frame_end(uint64_t frame) {
     if (getenv("YKW_INTERP_LOG") && now - t_log > 5000000000ull) {
         if (t_log && frames)
             LOG("[interp] %llu frames: %llu calls, %llu KB a frame, %llu not replayable; %.1f images/s, %llu in-betweens, "
-                "%llu cuts, %llu late (YKW_SIM_HZ)\n", (unsigned long long)frames, (unsigned long long)(calls / frames),
-                (unsigned long long)(bytes / frames >> 10), (unsigned long long)bad_frames,
-                g_images * 1e9 / (double)(now - t_log), (unsigned long long)g_mids, (unsigned long long)g_cuts,
-                (unsigned long long)g_sim_missed);
-        t_log = now, frames = calls = bytes = bad_frames = 0, g_images = g_mids = g_cuts = 0, g_sim_missed = 0;
+                "%llu cuts, %llu late (YKW_SIM_HZ), %llu back-offs\n", (unsigned long long)frames,
+                (unsigned long long)(calls / frames), (unsigned long long)(bytes / frames >> 10),
+                (unsigned long long)bad_frames, g_images * 1e9 / (double)(now - t_log), (unsigned long long)g_mids,
+                (unsigned long long)g_cuts, (unsigned long long)g_sim_missed, (unsigned long long)g_backoffs);
+        t_log = now, frames = calls = bytes = bad_frames = 0, g_images = g_mids = g_cuts = 0, g_sim_missed = 0, g_backoffs = 0;
     }
     flush_deletes(f);
     g_cur ^= 1;

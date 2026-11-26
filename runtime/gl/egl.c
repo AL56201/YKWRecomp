@@ -344,6 +344,95 @@ static void shift_log(void) {
 
 static uint64_t g_swap_end_ns;  // (debug: frame work time, YKW_WORK_LOG)
 
+// (debug) YKW_FLICKER_LOG=<first tick>-<last tick>: every image about to be presented (the game's own and
+// gl/interp.c's in-betweens), sampled on 9 rows (every 4th pixel, luma); an image that differs from both its
+// neighbours much more than they differ from each other is logged as a flicker, with the three differences (mean
+// |luma difference|, 0-255) and which rows stood out. A summary of all images every 5 s.
+void flicker_probe(double game_t) {
+    static long lo = -2, hi;
+    if (lo == -2) { const char *e = getenv("YKW_FLICKER_LOG"); lo = -1; if (e && sscanf(e, "%ld-%ld", &lo, &hi) != 2) lo = -1; }
+    if (lo < 0) return;
+    extern uint64_t ykw_test_tick(void);
+    long tick = (long)ykw_test_tick();
+    if (tick < lo || tick > hi) return;
+    enum { ROWS = 9, COLS = 480 };
+    static uint8_t img[3][ROWS][COLS];
+    static double gt[3];
+    static int n;
+    static uint8_t line[1920 * 4];
+    int w, h;
+    extern bool fb0_read_bind(int *w, int *h);
+    static PFNGLBINDFRAMEBUFFERPROC bind_fb;
+    if (!bind_fb) bind_fb = (PFNGLBINDFRAMEBUFFERPROC)gl_proc("glBindFramebuffer");
+    GLint read_fb, pack;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fb);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &pack);
+    if (!fb0_read_bind(&w, &h)) return;
+    if (w > 1920) w = 1920;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    uint8_t (*cur)[COLS] = img[n % 3];
+    for (int r = 0; r < ROWS; r++) {
+        glReadPixels(0, h * (r + 1) / (ROWS + 1), w, 1, GL_RGBA, GL_UNSIGNED_BYTE, line);
+        for (int x = 0; x < COLS; x++) {
+            const uint8_t *q = line + (size_t)(x * w / COLS) * 4;
+            cur[r][x] = (uint8_t)((q[0] * 3 + q[1] * 6 + q[2]) / 10);
+        }
+    }
+    glPixelStorei(GL_PACK_ALIGNMENT, pack);
+    bind_fb(GL_READ_FRAMEBUFFER, (GLuint)read_fb);
+    gt[n % 3] = game_t;
+    n++;
+    static uint64_t images, flickers;
+    images++;
+    if (n >= 3) {  // judge the middle one of the last three
+        uint8_t (*a)[COLS] = img[(n - 3) % 3], (*b)[COLS] = img[(n - 2) % 3], (*c)[COLS] = cur;
+        double dab = 0, dbc = 0, dac = 0, rows_ab[ROWS] = {0}, rows_bc[ROWS] = {0};
+        for (int r = 0; r < ROWS; r++)
+            for (int x = 0; x < COLS; x++) {
+                int ab = abs(a[r][x] - b[r][x]), bc = abs(b[r][x] - c[r][x]), ac = abs(a[r][x] - c[r][x]);
+                dab += ab, dbc += bc, dac += ac, rows_ab[r] += ab, rows_bc[r] += bc;
+            }
+        dab /= ROWS * COLS, dbc /= ROWS * COLS, dac /= ROWS * COLS;
+        // (and per block - 9 rows x 8 column spans - for a flicker in one place: a shadow, an object)
+        int blocks = 0, worst_r = -1, worst_c = -1;
+        double worst = 0;
+        for (int r = 0; r < ROWS; r++)
+            for (int bx = 0; bx < 8; bx++) {
+                double ab = 0, bc = 0, ac = 0;
+                for (int x = bx * COLS / 8; x < (bx + 1) * COLS / 8; x++)
+                    ab += abs(a[r][x] - b[r][x]), bc += abs(b[r][x] - c[r][x]), ac += abs(a[r][x] - c[r][x]);
+                ab /= COLS / 8, bc /= COLS / 8, ac /= COLS / 8;
+                if (ab > 2.0 * ac + 10.0 && bc > 2.0 * ac + 10.0) {
+                    blocks++;
+                    double s = ab < bc ? ab : bc;
+                    if (s > worst) worst = s, worst_r = r, worst_c = bx;
+                }
+            }
+        if (blocks) {
+            flickers++;
+            LOG("[flicker] tick %ld frame %llu: image at game %.3f: %d block(s) stand out, worst row %d (of 9, top 0) "
+                "column %d (of 8) by %.0f; whole image %.1f / %.1f vs %.1f\n", tick, (unsigned long long)g_swaps + 1,
+                gt[(n - 2) % 3], blocks, worst_r, worst_c, worst, dab, dbc, dac);
+        } else if (dab > 2.0 * dac + 3.0 && dbc > 2.0 * dac + 3.0) {
+            flickers++;
+            char rs[64];
+            int k = 0;
+            for (int r = 0; r < ROWS; r++) {
+                double m = (rows_ab[r] + rows_bc[r]) / (2.0 * COLS);
+                k += snprintf(rs + k, sizeof rs - k, "%s%.0f", r ? " " : "", m);
+            }
+            LOG("[flicker] tick %ld frame %llu: image at game %.3f stands out: %.1f / %.1f vs %.1f between its neighbours "
+                "(rows top..bottom: %s)\n", tick, (unsigned long long)g_swaps + 1, gt[(n - 2) % 3], dab, dbc, dac, rs);
+        }
+    }
+    static uint64_t t_log;
+    uint64_t now = plat_now_ns();
+    if (now - t_log > 5000000000ull) {
+        if (t_log) LOG("[flicker] %llu images, %llu flickers\n", (unsigned long long)images, (unsigned long long)flickers);
+        t_log = now, images = flickers = 0;
+    }
+}
+
 HLE_FUNC("eglSwapBuffers", egl_swap_buffers) {
     extern void vi_set_frame_thread(void);
     vi_set_frame_thread();  // (hle/vi.c: interpolating, the vsync it asks for goes out once this thread waits)
@@ -366,6 +455,7 @@ HLE_FUNC("eglSwapBuffers", egl_swap_buffers) {
     bool interp_presented = interp_frame_end(g_swaps + 1);  //  the frame and its in-betweens itself, and told vi.c)
     if (!interp_presented) {
         extern void fb0_present(void);  // (fb0.c: the game's image, scaled into the window)
+        flicker_probe((double)g_swaps + 1);
         fb0_present();
         SDL_GL_SwapWindow(g_window);
     }
